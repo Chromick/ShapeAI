@@ -1,0 +1,401 @@
+import { useEffect, useState } from "react";
+import { Alert, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
+import * as DocumentPicker from "expo-document-picker";
+import { File } from "expo-file-system";
+import { doc, onSnapshot, setDoc } from "firebase/firestore";
+import { SafeAreaView } from "react-native-safe-area-context";
+import { CheckPop, Reveal, SoftTouch, easeLayout } from "../components/motion";
+import { BRUNO_DIET_SOURCE, BRUNO_NUTRITIONIST_PLAN, isBrunoAccount } from "../data/brunoDiet";
+import { optionLabel, scheduleFor } from "../data/dietSchedule";
+import { analyzeDietFile } from "../services/aiService";
+import { auth, db } from "../services/firebaseConfig";
+import { UserProfile, Vitamin, emptyDay, trackingDocId } from "../services/nutrition";
+import { colors } from "../theme/colors";
+
+const MAX_FILE_BYTES = 8 * 1024 * 1024;
+
+export function DietScreen() {
+  const [plan, setPlan] = useState("");
+  const [vitamins, setVitamins] = useState<Vitamin[]>([]);
+  const [taken, setTaken] = useState<string[]>([]);
+  const [name, setName] = useState("");
+  const [dose, setDose] = useState("");
+  const [saved, setSaved] = useState(false);
+  const [analysis, setAnalysis] = useState("");
+  const [reading, setReading] = useState(false);
+  const [planSource, setPlanSource] = useState<string | undefined>();
+  const [mealsDone, setMealsDone] = useState<Record<string, string>>({});
+  const [openMeal, setOpenMeal] = useState<string | null>(null);
+  const [showText, setShowText] = useState(false);
+
+  useEffect(() => {
+    const uid = auth.currentUser?.uid;
+    if (!uid) return;
+    const unsubUser = onSnapshot(doc(db, "users", uid), (snapshot) => {
+      if (!snapshot.exists()) return;
+      const data = snapshot.data() as UserProfile;
+      const currentPlan = data.nutritionistPlan ?? "";
+      setPlan(currentPlan);
+      setPlanSource(data.nutritionistPlanSource);
+      setAnalysis(data.nutritionistAnalysis ?? "");
+      setVitamins(data.vitamins ?? []);
+      const email = auth.currentUser?.email;
+      if (!currentPlan.trim() && !data.nutritionistPlanSource && isBrunoAccount(email, data.name)) {
+        setPlan(BRUNO_NUTRITIONIST_PLAN);
+        setDoc(
+          doc(db, "users", uid),
+          { nutritionistPlan: BRUNO_NUTRITIONIST_PLAN, nutritionistPlanSource: BRUNO_DIET_SOURCE },
+          { merge: true },
+        ).catch((error) => console.error(error));
+      }
+    });
+    const unsubDay = onSnapshot(doc(db, "daily_tracking", trackingDocId(uid)), (snapshot) => {
+      const data = snapshot.exists() ? snapshot.data() : emptyDay();
+      setTaken(data.vitamins_taken ?? []);
+      setMealsDone(data.meals_done ?? {});
+    });
+    return () => {
+      unsubUser();
+      unsubDay();
+    };
+  }, []);
+
+  async function savePlan() {
+    const uid = auth.currentUser?.uid;
+    if (!uid) return;
+    await setDoc(doc(db, "users", uid), { nutritionistPlan: plan.trim() }, { merge: true });
+    setSaved(true);
+  }
+
+  async function sendDietFile() {
+    const uid = auth.currentUser?.uid;
+    if (!uid || reading) return;
+    const picked = await DocumentPicker.getDocumentAsync({
+      type: ["application/pdf", "image/*"],
+      copyToCacheDirectory: true,
+      multiple: false,
+    });
+    if (picked.canceled || !picked.assets[0]) return;
+    const asset = picked.assets[0];
+    if (asset.size && asset.size > MAX_FILE_BYTES) {
+      Alert.alert("Arquivo grande", "Manda um PDF ou uma imagem de até 8 MB.");
+      return;
+    }
+    const mime = asset.mimeType || (asset.name.toLowerCase().endsWith(".pdf") ? "application/pdf" : "image/jpeg");
+    setReading(true);
+    try {
+      const base64 = await new File(asset.uri).base64();
+      const result = await analyzeDietFile({ name: asset.name, mime, base64 });
+      if ("error" in result) {
+        Alert.alert("Dieta", result.error);
+        return;
+      }
+      setPlan(result.plan);
+      setAnalysis(result.analysis);
+      await setDoc(
+        doc(db, "users", uid),
+        {
+          nutritionistPlan: result.plan,
+          nutritionistAnalysis: result.analysis,
+          nutritionistPlanSource: "arquivo",
+        },
+        { merge: true },
+      );
+      setSaved(true);
+    } catch (error) {
+      Alert.alert("Dieta", `Não consegui ler esse arquivo. ${String(error)}`);
+    } finally {
+      setReading(false);
+    }
+  }
+
+  async function chooseMeal(mealId: string, optionId: string) {
+    easeLayout();
+    const uid = auth.currentUser?.uid;
+    if (!uid) return;
+    const next = { ...mealsDone };
+    if (next[mealId] === optionId) delete next[mealId];
+    else next[mealId] = optionId;
+    setMealsDone(next);
+    await setDoc(doc(db, "daily_tracking", trackingDocId(uid)), { meals_done: next }, { merge: true });
+  }
+
+  async function addVitamin() {
+    const uid = auth.currentUser?.uid;
+    const cleanName = name.trim();
+    if (!uid || !cleanName) return;
+    const next = [...vitamins, { id: Date.now().toString(), name: cleanName, dose: dose.trim() }];
+    setVitamins(next);
+    setName("");
+    setDose("");
+    await setDoc(doc(db, "users", uid), { vitamins: next }, { merge: true });
+  }
+
+  async function removeVitamin(id: string) {
+    const uid = auth.currentUser?.uid;
+    if (!uid) return;
+    const next = vitamins.filter((vitamin) => vitamin.id !== id);
+    setVitamins(next);
+    await setDoc(doc(db, "users", uid), { vitamins: next }, { merge: true });
+  }
+
+  async function toggleVitamin(id: string) {
+    easeLayout();
+    const uid = auth.currentUser?.uid;
+    if (!uid) return;
+    const next = taken.includes(id) ? taken.filter((item) => item !== id) : [...taken, id];
+    setTaken(next);
+    await setDoc(doc(db, "daily_tracking", trackingDocId(uid)), { vitamins_taken: next }, { merge: true });
+  }
+
+  const pending = vitamins.filter((vitamin) => !taken.includes(vitamin.id)).length;
+  const meals = scheduleFor(plan, planSource);
+  const eaten = meals.filter((meal) => mealsDone[meal.id]).length;
+
+  return (
+    <SafeAreaView style={styles.safe} edges={["top"]}>
+      <Reveal>
+      <ScrollView contentContainerStyle={styles.content}>
+        <Text style={styles.title}>Dieta</Text>
+        <Text style={styles.lead}>
+          O tutor segue o plano da sua nutricionista. Ele não inventa outro cardápio nem dose de vitamina.
+        </Text>
+
+        {meals.length ? (
+          <>
+            <Text style={styles.section}>Hoje</Text>
+            <Text style={styles.lead}>
+              {eaten} de {meals.length} refeições marcadas. Escolhe a opção que comeu. A nutricionista pediu intervalo de 3 ou 4 horas.
+            </Text>
+            {meals.map((meal) => {
+              const chosen = mealsDone[meal.id];
+              const open = openMeal === meal.id;
+              return (
+                <View key={meal.id} style={styles.meal}>
+                  <SoftTouch
+                    onPress={() => {
+                      easeLayout();
+                      setOpenMeal(open ? null : meal.id);
+                    }}
+                  >
+                    <View style={styles.mealHead}>
+                      <CheckPop on={Boolean(chosen)}>
+                        <View style={[styles.check, chosen && styles.checkOn]}>
+                          <Text style={styles.checkMark}>{chosen ? "✓" : ""}</Text>
+                        </View>
+                      </CheckPop>
+                      <View style={styles.mealText}>
+                        <Text style={styles.vitaminName}>{meal.title}</Text>
+                        <Text style={styles.dose} numberOfLines={open ? 6 : 2}>
+                          {optionLabel(meal, chosen)}
+                        </Text>
+                      </View>
+                    </View>
+                    {meal.note ? <Text style={styles.note}>{meal.note}</Text> : null}
+                  </SoftTouch>
+                  {open
+                    ? meal.options.map((option) => {
+                        const on = chosen === option.id;
+                        return (
+                          <SoftTouch
+                            key={option.id}
+                            style={[styles.option, on && styles.optionOn]}
+                            onPress={() => chooseMeal(meal.id, option.id)}
+                          >
+                            <Text style={[styles.optionText, on && styles.optionTextOn]}>{option.label}</Text>
+                          </SoftTouch>
+                        );
+                      })
+                    : null}
+                </View>
+              );
+            })}
+          </>
+        ) : null}
+
+        <SoftTouch
+          onPress={() => {
+            easeLayout();
+            setShowText((open) => !open);
+          }}
+        >
+          <Text style={styles.section}>{showText || !meals.length ? "Texto do plano" : "Ver texto do plano"}</Text>
+        </SoftTouch>
+        {showText || !meals.length ? (
+        <>
+        <TextInput
+          style={styles.plan}
+          multiline
+          placeholder="Cole aqui as refeições, horários e observações que ela passou."
+          placeholderTextColor={colors.textSecondary}
+          value={plan}
+          onChangeText={(value) => {
+            setPlan(value);
+            setSaved(false);
+          }}
+        />
+        <SoftTouch style={styles.button} onPress={savePlan}>
+          <Text style={styles.buttonText}>{saved ? "Plano salvo" : "Salvar plano"}</Text>
+        </SoftTouch>
+        <SoftTouch style={styles.secondary} onPress={sendDietFile} disabled={reading}>
+          <Text style={styles.secondaryText}>{reading ? "Lendo o arquivo..." : "Enviar arquivo da dieta"}</Text>
+        </SoftTouch>
+        <Text style={styles.lead}>PDF ou foto do plano. O tutor transcreve o cardápio e deixa uma leitura curta, sem inventar outro.</Text>
+        {analysis ? <Text style={styles.analysis}>{analysis}</Text> : null}
+        </>
+        ) : null}
+
+        <Text style={styles.section}>Vitaminas de hoje</Text>
+        <Text style={styles.lead}>
+          {vitamins.length === 0
+            ? "Cadastre só o que ela sugeriu. O app marca o que você tomou e cobra o que ficou de fora."
+            : pending === 0
+              ? "Tudo do dia marcado."
+              : `${pending} ainda sem marcar hoje.`}
+        </Text>
+        {vitamins.map((vitamin) => {
+          const checked = taken.includes(vitamin.id);
+          return (
+            <View key={vitamin.id} style={styles.vitamin}>
+              <SoftTouch style={styles.vitaminMain} onPress={() => toggleVitamin(vitamin.id)}>
+                <CheckPop on={checked}>
+                  <View style={[styles.check, checked && styles.checkOn]}>
+                    <Text style={styles.checkMark}>{checked ? "✓" : ""}</Text>
+                  </View>
+                </CheckPop>
+                <View>
+                  <Text style={styles.vitaminName}>{vitamin.name}</Text>
+                  <Text style={styles.dose}>{vitamin.dose || "Dose não informada"}</Text>
+                </View>
+              </SoftTouch>
+              <SoftTouch onPress={() => removeVitamin(vitamin.id)}>
+                <Text style={styles.remove}>Tirar</Text>
+              </SoftTouch>
+            </View>
+          );
+        })}
+
+        <TextInput
+          style={styles.input}
+          placeholder="Nome da vitamina"
+          placeholderTextColor={colors.textSecondary}
+          value={name}
+          onChangeText={setName}
+        />
+        <TextInput
+          style={styles.input}
+          placeholder="Dose que ela passou, se tiver"
+          placeholderTextColor={colors.textSecondary}
+          value={dose}
+          onChangeText={setDose}
+        />
+        <SoftTouch style={styles.secondary} onPress={addVitamin}>
+          <Text style={styles.secondaryText}>Adicionar vitamina</Text>
+        </SoftTouch>
+      </ScrollView>
+      </Reveal>
+    </SafeAreaView>
+  );
+}
+
+const styles = StyleSheet.create({
+  safe: { flex: 1, backgroundColor: colors.background },
+  content: { padding: 20, paddingBottom: 40 },
+  title: { color: colors.text, fontSize: 28, fontWeight: "800" },
+  lead: { color: colors.textSecondary, marginTop: 8, marginBottom: 8, lineHeight: 20 },
+  section: { color: colors.text, fontWeight: "800", marginTop: 18, marginBottom: 8 },
+  plan: {
+    minHeight: 140,
+    textAlignVertical: "top",
+    backgroundColor: colors.surface,
+    color: colors.text,
+    borderRadius: 14,
+    padding: 14,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  button: {
+    backgroundColor: colors.primary,
+    borderRadius: 14,
+    paddingVertical: 14,
+    alignItems: "center",
+    marginTop: 10,
+  },
+  buttonText: { color: colors.background, fontWeight: "800" },
+  analysis: {
+    color: colors.text,
+    marginTop: 12,
+    lineHeight: 20,
+    backgroundColor: colors.surface,
+    borderRadius: 14,
+    padding: 14,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  vitamin: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    backgroundColor: colors.surface,
+    borderRadius: 14,
+    padding: 12,
+    marginBottom: 8,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  vitaminMain: { flexDirection: "row", alignItems: "center", gap: 10, flex: 1 },
+  check: {
+    width: 28,
+    height: 28,
+    borderRadius: 8,
+    backgroundColor: colors.surfaceHighlight,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  checkOn: { backgroundColor: colors.primary },
+  checkMark: { color: colors.background, fontWeight: "800" },
+  vitaminName: { color: colors.text, fontWeight: "700" },
+  dose: { color: colors.textSecondary, fontSize: 12 },
+  meal: {
+    backgroundColor: colors.surface,
+    borderRadius: 14,
+    padding: 12,
+    marginBottom: 8,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  mealHead: { flexDirection: "row", gap: 10 },
+  mealText: { flex: 1 },
+  note: { color: colors.primary, marginTop: 8, fontSize: 12 },
+  option: {
+    marginTop: 8,
+    borderRadius: 10,
+    padding: 10,
+    backgroundColor: colors.background,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  optionOn: { backgroundColor: colors.primary, borderColor: colors.primary },
+  optionText: { color: colors.text, lineHeight: 18 },
+  optionTextOn: { color: colors.background, fontWeight: "700" },
+  remove: { color: colors.error, fontSize: 12 },
+  input: {
+    backgroundColor: colors.surface,
+    color: colors.text,
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    marginTop: 8,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  secondary: {
+    borderRadius: 14,
+    paddingVertical: 14,
+    alignItems: "center",
+    marginTop: 10,
+    borderWidth: 1,
+    borderColor: colors.primary,
+  },
+  secondaryText: { color: colors.primary, fontWeight: "800" },
+});

@@ -1,25 +1,86 @@
 {
   "expo": {
-    "name": "shape-ai-app",
-    "slug": "shape-ai-app",
+    "name": "Shape",
+    "slug": "shape-ai",
+    "owner": "barralbruno",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
-    "userInterfaceStyle": "light",
+    "userInterfaceStyle": "dark",
+    "newArchEnabled": true,
+    "splash": {
+      "image": "./assets/splash-icon.png",
+      "backgroundColor": "#101410",
+      "resizeMode": "contain"
+    },
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSMicrophoneUsageDescription": "O Shape usa o microfone para gravar as refeições por voz.",
+        "NSCameraUsageDescription": "O Shape usa a câmera para identificar aparelhos da academia e o que você comeu."
+      }
     },
     "android": {
+      "package": "com.forhim.shapeai",
       "adaptiveIcon": {
-        "backgroundColor": "#E6F4FE",
+        "backgroundColor": "#101410",
         "foregroundImage": "./assets/android-icon-foreground.png",
         "backgroundImage": "./assets/android-icon-background.png",
         "monochromeImage": "./assets/android-icon-monochrome.png"
       },
+      "permissions": [
+        "android.permission.RECORD_AUDIO",
+        "android.permission.MODIFY_AUDIO_SETTINGS",
+        "android.permission.CAMERA",
+        "android.permission.POST_NOTIFICATIONS"
+      ],
+      "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false
     },
     "web": {
       "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      [
+        "expo-audio",
+        {
+          "microphonePermission": "O Shape usa o microfone para gravar as refeições por voz."
+        }
+      ],
+      [
+        "expo-notifications",
+        {
+          "color": "#D6F25C"
+        }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "cameraPermission": "O Shape usa a câmera para identificar aparelhos da academia e o que você comeu."
+        }
+      ],
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "minSdkVersion": 26
+          }
+        }
+      ],
+      "react-native-health-connect",
+      "./plugins/withHealthPermissions.js",
+      [
+        "@kingstinct/react-native-healthkit",
+        {
+          "NSHealthShareUsageDescription": "O Shape lê o sono e a frequência cardíaca em repouso que o relógio enviou para o app Saúde.",
+          "NSHealthUpdateUsageDescription": "O Shape não grava dados de saúde. A permissão existe só para abrir o app Saúde."
+        }
+      ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "760fe629-2728-4fbb-a1f8-5296106854d0"
+      }
     }
   }
 }

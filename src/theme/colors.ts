@@ -1,0 +1,16 @@
+export const colors = {
+  background: "#101410",
+  surface: "#1A211C",
+  surfaceHighlight: "#24302A",
+  wash: "#222C18",
+  primary: "#D6F25C",
+  primaryDark: "#B6D24A",
+  text: "#F3F6F1",
+  textSecondary: "#9AA89F",
+  border: "#2E3A33",
+  error: "#E85D4C",
+  calories: "#F0A06A",
+  carbs: "#F2C14E",
+  fat: "#7EC8C3",
+  over: "#E85D4C",
+};
