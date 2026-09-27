@@ -7,6 +7,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { CheckPop, Reveal, SoftTouch, easeLayout } from "../components/motion";
 import { BRUNO_DIET_SOURCE, BRUNO_NUTRITIONIST_PLAN, isBrunoAccount } from "../data/brunoDiet";
 import { optionLabel, scheduleFor } from "../data/dietSchedule";
+import { FoodAnswer, foodById, slotNow, slotsForCount, suggestFood } from "../data/suggestedDiet";
 import { analyzeDietFile } from "../services/aiService";
 import { auth, db } from "../services/firebaseConfig";
 import { UserProfile, Vitamin, emptyDay, trackingDocId } from "../services/nutrition";
@@ -27,6 +28,9 @@ export function DietScreen() {
   const [mealsDone, setMealsDone] = useState<Record<string, string>>({});
   const [openMeal, setOpenMeal] = useState<string | null>(null);
   const [showText, setShowText] = useState(false);
+  const [mealsPerDay, setMealsPerDay] = useState<number | undefined>();
+  const [foodAnswers, setFoodAnswers] = useState<Record<string, FoodAnswer>>({});
+  const [skipped, setSkipped] = useState<string[]>([]);
 
   useEffect(() => {
     const uid = auth.currentUser?.uid;
@@ -39,6 +43,8 @@ export function DietScreen() {
       setPlanSource(data.nutritionistPlanSource);
       setAnalysis(data.nutritionistAnalysis ?? "");
       setVitamins(data.vitamins ?? []);
+      setMealsPerDay(data.mealsPerDay || undefined);
+      setFoodAnswers(data.foodAnswers ?? {});
       const email = auth.currentUser?.email;
       if (!currentPlan.trim() && !data.nutritionistPlanSource && isBrunoAccount(email, data.name)) {
         setPlan(BRUNO_NUTRITIONIST_PLAN);
@@ -109,6 +115,39 @@ export function DietScreen() {
     }
   }
 
+  async function saveMealCount(count: number) {
+    const uid = auth.currentUser?.uid;
+    if (!uid) return;
+    setMealsPerDay(count);
+    await setDoc(doc(db, "users", uid), { mealsPerDay: count }, { merge: true });
+  }
+
+  async function answerFood(foodId: string, slotId: string, answer: FoodAnswer | "later") {
+    const uid = auth.currentUser?.uid;
+    if (!uid) return;
+    if (answer === "later") {
+      setSkipped((current) => [...current, foodId]);
+      return;
+    }
+    const nextAnswers = { ...foodAnswers, [foodId]: answer };
+    setFoodAnswers(nextAnswers);
+    setSkipped((current) => current.filter((id) => id !== foodId));
+    if (answer === "eats") {
+      const nextMeals = { ...mealsDone, [slotId]: foodId };
+      setMealsDone(nextMeals);
+      await setDoc(doc(db, "daily_tracking", trackingDocId(uid)), { meals_done: nextMeals }, { merge: true });
+    }
+    await setDoc(doc(db, "users", uid), { foodAnswers: nextAnswers }, { merge: true });
+  }
+
+  async function clearMealCount() {
+    const uid = auth.currentUser?.uid;
+    if (!uid) return;
+    setMealsPerDay(undefined);
+    setSkipped([]);
+    await setDoc(doc(db, "users", uid), { mealsPerDay: null }, { merge: true });
+  }
+
   async function chooseMeal(mealId: string, optionId: string) {
     easeLayout();
     const uid = auth.currentUser?.uid;
@@ -158,8 +197,34 @@ export function DietScreen() {
       <ScrollView contentContainerStyle={styles.content}>
         <Text style={styles.title}>Dieta</Text>
         <Text style={styles.lead}>
-          O tutor segue o plano da sua nutricionista. Ele não inventa outro cardápio nem dose de vitamina.
+          {plan.trim()
+            ? "O tutor segue o plano da sua nutricionista. Ele não inventa outro cardápio nem dose de vitamina."
+            : "Sem plano de nutricionista, o app sugere pelo horário. Você diz se come e se tem o alimento."}
         </Text>
+
+        {!plan.trim() ? (
+          mealsPerDay ? (
+            <Suggestion
+              count={mealsPerDay}
+              answers={foodAnswers}
+              skipped={skipped}
+              chosenId={mealsDone[slotNow(slotsForCount(mealsPerDay)).id]}
+              onAnswer={answerFood}
+              onResetCount={clearMealCount}
+            />
+          ) : (
+            <View style={styles.meal}>
+              <Text style={styles.vitaminName}>Quantas refeições você faz no dia?</Text>
+              <View style={styles.countRow}>
+                {[3, 4, 5, 6].map((count) => (
+                  <SoftTouch key={count} style={styles.countChip} onPress={() => saveMealCount(count)}>
+                    <Text style={styles.countText}>{count}</Text>
+                  </SoftTouch>
+                ))}
+              </View>
+            </View>
+          )
+        ) : null}
 
         {meals.length ? (
           <>
@@ -298,6 +363,53 @@ export function DietScreen() {
   );
 }
 
+function Suggestion({
+  count,
+  answers,
+  skipped,
+  chosenId,
+  onAnswer,
+  onResetCount,
+}: {
+  count: number;
+  answers: Record<string, FoodAnswer>;
+  skipped: string[];
+  chosenId?: string;
+  onAnswer: (foodId: string, slotId: string, answer: FoodAnswer | "later") => void;
+  onResetCount: () => void;
+}) {
+  const slots = slotsForCount(count);
+  const slot = slotNow(slots);
+  const food = suggestFood(slot.id, answers, skipped);
+  const chosen = chosenId ? foodById(chosenId) : undefined;
+  return (
+    <View style={styles.meal}>
+      <Text style={styles.vitaminName}>Agora · {slot.title}</Text>
+      <Text style={styles.dose}>{count} refeições no dia. A sugestão muda com o horário.</Text>
+      {chosen ? <Text style={styles.note}>Marcado: {chosen.label}</Text> : null}
+      {food ? (
+        <>
+          <Text style={styles.suggestion}>{food.label}</Text>
+          <SoftTouch style={styles.option} onPress={() => onAnswer(food.id, slot.id, "eats")}>
+            <Text style={styles.optionText}>Tenho e como</Text>
+          </SoftTouch>
+          <SoftTouch style={styles.option} onPress={() => onAnswer(food.id, slot.id, "later")}>
+            <Text style={styles.optionText}>Agora não tenho</Text>
+          </SoftTouch>
+          <SoftTouch style={styles.option} onPress={() => onAnswer(food.id, slot.id, "avoids")}>
+            <Text style={styles.optionText}>Não como isso</Text>
+          </SoftTouch>
+        </>
+      ) : (
+        <Text style={styles.dose}>Nesta hora não sobrou alimento que você come.</Text>
+      )}
+      <SoftTouch onPress={onResetCount}>
+        <Text style={styles.note}>Mudar quantas refeições</Text>
+      </SoftTouch>
+    </View>
+  );
+}
+
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: colors.background },
   content: { padding: 20, paddingBottom: 40 },
@@ -367,6 +479,18 @@ const styles = StyleSheet.create({
   mealHead: { flexDirection: "row", gap: 10 },
   mealText: { flex: 1 },
   note: { color: colors.primary, marginTop: 8, fontSize: 12 },
+  countRow: { flexDirection: "row", gap: 8, marginTop: 10 },
+  countChip: {
+    flex: 1,
+    backgroundColor: colors.background,
+    borderRadius: 12,
+    paddingVertical: 14,
+    alignItems: "center",
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  countText: { color: colors.text, fontWeight: "800", fontSize: 18 },
+  suggestion: { color: colors.text, fontSize: 18, fontWeight: "800", marginTop: 10, lineHeight: 24 },
   option: {
     marginTop: 8,
     borderRadius: 10,

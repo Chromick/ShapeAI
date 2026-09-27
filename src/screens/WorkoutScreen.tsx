@@ -231,6 +231,7 @@ export function WorkoutScreen({ navigation }: Props) {
         <Text style={styles.kicker}>{today.dayLabel}</Text>
         <Text style={styles.title}>{today.title}</Text>
         <Text style={styles.summary}>{today.summary}</Text>
+        {plan.progressionReason ? <Text style={styles.summary}>{plan.progressionReason}</Text> : null}
 
         {today.rest ? null : (
           <View style={styles.sleepBox}>

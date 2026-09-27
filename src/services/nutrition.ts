@@ -1,3 +1,4 @@
+import type { FoodAnswer } from "../data/suggestedDiet";
 import type { StoredPlan } from "../data/trainingPlan";
 
 export type Gender = "M" | "F";
@@ -46,6 +47,8 @@ export type UserProfile = {
   vitamins?: Vitamin[];
   trainingPlan?: StoredPlan;
   lastLoads?: Record<string, { values: string[]; date: string }>;
+  mealsPerDay?: number;
+  foodAnswers?: Record<string, FoodAnswer>;
 };
 
 export type DailyTracking = {

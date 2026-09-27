@@ -116,7 +116,7 @@ export function OnboardingScreen({ navigation }: Props) {
       </View>
       <Text style={styles.title}>Seu ponto de partida</Text>
       <Text style={styles.subtitle}>
-        Nome, peso e objetivo. A partir daqui o tutor acompanha treino, dieta e o dia.
+        Nome, idade, peso e objetivo. A idade entra no tipo de treino.
       </Text>
 
       <Text style={styles.label}>Como quer ser chamado?</Text>

@@ -47,8 +47,52 @@ export type StoredPlan = {
   daysPerWeek: DaysPerWeek;
   priorities: MuscleId[];
   progression?: Progression;
+  progressionReason?: string;
   sessions: TrainingSession[];
 };
+
+export function progressionFor(
+  metrics: { age?: number; activity?: number } | undefined,
+  sleep?: "good" | "poor" | null,
+): { progression: Progression; reason: string } {
+  const age = Number(metrics?.age);
+  const activity = Number(metrics?.activity);
+  const years = Number.isFinite(age) && age > 0 ? age : 0;
+  const trains = Number.isFinite(activity) && activity >= 1.55;
+  const intense = Number.isFinite(activity) && activity >= 1.725;
+
+  if (!years) {
+    return {
+      progression: "straight",
+      reason: "Sem idade no perfil. Séries comuns até a idade entrar.",
+    };
+  }
+  if (sleep === "poor") {
+    return {
+      progression: "straight",
+      reason: "Sono ruim. Séries comuns, sem subir carga e sem ir até a falha.",
+    };
+  }
+  if (years >= 45 || !trains) {
+    return {
+      progression: "straight",
+      reason:
+        years >= 45
+          ? `Aos ${years} anos, séries comuns. A mesma carga nas 3 séries, de 8 a 12.`
+          : "Treino ainda leve. Séries comuns até o movimento assentar.",
+    };
+  }
+  if (years < 35 && intense && sleep === "good") {
+    return {
+      progression: "failure",
+      reason: "Idade, treino intenso e noite boa. Séries até a falha.",
+    };
+  }
+  return {
+    progression: "pyramid",
+    reason: `Aos ${years} anos e já treinando na semana. Pirâmide 12, 10 e 8, uma carga por série.`,
+  };
+}
 
 type Region = "upper" | "lower";
 type SessionKind = "upper" | "lower" | "full";
@@ -353,10 +397,11 @@ export function rulesFor(plan: StoredPlan | undefined): string {
         : "pirâmide 12 → 10 → 8, com uma carga para cada série";
   return `Dias: ${plan.daysPerWeek} por semana (${agenda}).
 Prioridades, no máximo duas: ${names}. Elas abrem o treino quando aparecem e ficam com 9 séries. Os outros grupamentos ficam com 6.
-Progressão desta ficha: ${current}.
-A pirâmide não é a melhor escolha para todo mundo. Séries comuns servem para quem está aprendendo o movimento. Até a falha só cabe com sono e recuperação bons. Tempo, como a prancha, não tem carga.
+Progressão desta ficha: ${current}. ${plan.progressionReason ?? ""}
+O formato já foi escolhido pelos dados: idade, quanto a pessoa treina e o sono. Não peça para ela escolher pirâmide, série comum ou falha na entrada.
+Séries comuns servem para idade mais alta, treino leve ou sono ruim. Até a falha só cabe com menos de 35 anos, treino intenso e noite boa. Tempo, como a prancha, não tem carga.
 Sono ruim ou déficit: não sobe carga e não manda ir até a falha. Mantém a última carga.
-Se a pessoa quiser outro formato de série, explica a diferença e pede para gerar a ficha de novo na aba Treino. Não reescreve a divisão sozinho.
+Se a pessoa quiser outro formato, explica a diferença. A ficha só muda quando ela gera de novo na aba Treino, e o app recalcula o formato. Não reescreve a divisão sozinho.
 Se a pessoa trocar um exercício porque o aparelho estava ocupado, use swap_exercise no mesmo grupamento e no dia em que ela treinou. A troca fica gravada na ficha.`;
 }
 

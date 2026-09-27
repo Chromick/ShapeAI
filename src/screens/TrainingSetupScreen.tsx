@@ -1,21 +1,16 @@
-import { useState } from "react";
-import { Alert, ScrollView, StyleSheet, Text, View } from "react-native";
+import { useEffect, useState } from "react";
+import { Alert, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { NativeStackScreenProps } from "@react-navigation/native-stack";
-import { doc, setDoc } from "firebase/firestore";
+import { doc, getDoc, setDoc } from "firebase/firestore";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Reveal, SoftTouch } from "../components/motion";
-import { DaysPerWeek, MUSCLES, MuscleId, Progression, buildPlan } from "../data/trainingPlan";
+import { DaysPerWeek, MUSCLES, MuscleId, buildPlan, progressionFor } from "../data/trainingPlan";
 import { RootStackParamList } from "../navigation/types";
 import { auth, db } from "../services/firebaseConfig";
+import { Metrics, UserProfile, calculateTargets, safeCount, trackingDocId } from "../services/nutrition";
 import { colors } from "../theme/colors";
 
 type Props = NativeStackScreenProps<RootStackParamList, "TrainingSetup">;
-
-const progressionOptions: { value: Progression; label: string; detail: string }[] = [
-  { value: "pyramid", label: "Pirâmide", detail: "Três cargas: 12, 10 e 8. Para quem já conhece o movimento." },
-  { value: "straight", label: "Séries comuns", detail: "A mesma carga nas 3 séries, de 8 a 12." },
-  { value: "failure", label: "Até a falha", detail: "Sem número fixo de repetições. Só com sono e recuperação bons." },
-];
 
 const dayOptions: { value: DaysPerWeek; label: string; detail: string }[] = [
   { value: 3, label: "3 dias", detail: "Segunda, quarta e sexta. Corpo inteiro." },
@@ -26,8 +21,22 @@ const dayOptions: { value: DaysPerWeek; label: string; detail: string }[] = [
 export function TrainingSetupScreen({ navigation }: Props) {
   const [priorities, setPriorities] = useState<MuscleId[]>([]);
   const [days, setDays] = useState<DaysPerWeek | null>(null);
-  const [progression, setProgression] = useState<Progression>("pyramid");
   const [saving, setSaving] = useState(false);
+  const [profile, setProfile] = useState<UserProfile | null>(null);
+  const [sleep, setSleep] = useState<"good" | "poor" | null>(null);
+  const [ageDraft, setAgeDraft] = useState("");
+
+  useEffect(() => {
+    const uid = auth.currentUser?.uid;
+    if (!uid) return;
+    getDoc(doc(db, "users", uid)).then((snapshot) => {
+      if (snapshot.exists()) setProfile(snapshot.data() as UserProfile);
+    });
+    getDoc(doc(db, "daily_tracking", trackingDocId(uid))).then((snapshot) => {
+      const value = snapshot.data()?.sleep;
+      setSleep(value === "good" || value === "poor" ? value : null);
+    });
+  }, []);
 
   function toggle(id: MuscleId) {
     setPriorities((current) => {
@@ -43,10 +52,25 @@ export function TrainingSetupScreen({ navigation }: Props) {
       return;
     }
     const uid = auth.currentUser?.uid;
-    if (!uid) return;
+    if (!uid || !profile) return;
+    const typedAge = parseInt(ageDraft, 10);
+    const years = safeCount(profile.metrics?.age) || typedAge;
+    if (!years) {
+      Alert.alert("Idade", "Coloca a idade. O tipo de série sai dela.");
+      return;
+    }
     setSaving(true);
     try {
-      const trainingPlan = buildPlan(days, priorities, progression);
+      let metrics: Metrics = profile.metrics;
+      if (!safeCount(profile.metrics?.age)) {
+        metrics = { ...profile.metrics, age: years };
+        await setDoc(doc(db, "users", uid), { metrics, targets: calculateTargets(metrics) }, { merge: true });
+      }
+      const decided = progressionFor(metrics, sleep);
+      const trainingPlan = {
+        ...buildPlan(days, priorities, decided.progression),
+        progressionReason: decided.reason,
+      };
       await setDoc(doc(db, "users", uid), { trainingPlan }, { merge: true });
       navigation.replace("Main");
     } catch (error) {
@@ -95,16 +119,25 @@ export function TrainingSetupScreen({ navigation }: Props) {
         <Text style={styles.count}>{priorities.length} de 2</Text>
 
         <Text style={styles.section}>Tipo de série</Text>
-        {progressionOptions.map((option) => (
-          <SoftTouch
-            key={option.value}
-            style={[styles.day, progression === option.value && styles.dayOn]}
-            onPress={() => setProgression(option.value)}
-          >
-            <Text style={[styles.dayLabel, progression === option.value && styles.dayLabelOn]}>{option.label}</Text>
-            <Text style={styles.dayDetail}>{option.detail}</Text>
-          </SoftTouch>
-        ))}
+        <View style={styles.day}>
+          <Text style={styles.dayLabel}>O tutor escolhe</Text>
+          <Text style={styles.dayDetail}>
+            {profile ? progressionFor(profile.metrics, sleep).reason : "Lendo idade, treino e sono."}
+          </Text>
+        </View>
+        {profile && !safeCount(profile.metrics?.age) ? (
+          <>
+            <Text style={styles.section}>Idade</Text>
+            <TextInput
+              style={styles.age}
+              placeholder="Anos"
+              placeholderTextColor={colors.textSecondary}
+              keyboardType="number-pad"
+              value={ageDraft}
+              onChangeText={setAgeDraft}
+            />
+          </>
+        ) : null}
 
         <Text style={styles.section}>Dias disponíveis</Text>
         {dayOptions.map((option) => (
@@ -180,7 +213,16 @@ const styles = StyleSheet.create({
   dayOn: { borderColor: colors.primary },
   dayLabel: { color: colors.text, fontWeight: "800" },
   dayLabelOn: { color: colors.primary },
-  dayDetail: { color: colors.textSecondary, marginTop: 4 },
+  dayDetail: { color: colors.textSecondary, marginTop: 4, lineHeight: 20 },
+  age: {
+    backgroundColor: colors.surface,
+    color: colors.text,
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
   button: {
     backgroundColor: colors.primary,
     borderRadius: 14,

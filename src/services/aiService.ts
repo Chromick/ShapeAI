@@ -1,5 +1,6 @@
 import { doc, getDoc, setDoc } from "firebase/firestore";
 import { scheduleFor } from "../data/dietSchedule";
+import { avoidedNames, eatenNames } from "../data/suggestedDiet";
 import { StoredPlan, planScript, rulesFor, swapExercise } from "../data/trainingPlan";
 import { loadWeekClose } from "./weekClose";
 import { auth, db } from "./firebaseConfig";
@@ -65,9 +66,13 @@ function systemPrompt(
   const foods = frequentFoods.length
     ? frequentFoods.map((food) => `- ${food.name}: ${food.detail}`).join("\n")
     : "Nenhum alimento frequente salvo ainda.";
+  const eats = eatenNames(profile?.foodAnswers);
+  const avoids = avoidedNames(profile?.foodAnswers);
   const plan = profile?.nutritionistPlan?.trim()
     ? profile.nutritionistPlan.trim()
-    : "O plano da nutricionista ainda não foi colado no app. Não invente cardápio. Peça para ele colar na aba Dieta.";
+    : profile?.mealsPerDay
+      ? `Não há plano de nutricionista. O app sugere ${profile.mealsPerDay} refeições pelo horário. Ele come: ${eats.join("; ") || "ainda não marcou"}. Não come: ${avoids.join("; ") || "nada marcado"}. Não invente outro cardápio.`
+      : "O plano da nutricionista ainda não foi colado no app e o questionário de refeições não foi feito. Não invente cardápio. Peça para ele abrir a aba Dieta.";
   const vitamins = profile?.vitamins?.length
     ? profile.vitamins
         .map((vitamin) => {

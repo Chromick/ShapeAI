@@ -11,9 +11,11 @@ import {
 } from "react-native";
 import { BottomTabScreenProps } from "@react-navigation/bottom-tabs";
 import { CommonActions } from "@react-navigation/native";
+import { signOut } from "firebase/auth";
 import { doc, getDoc, onSnapshot, setDoc } from "firebase/firestore";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { optionLabel, scheduleFor } from "../data/dietSchedule";
+import { suggestedSchedule } from "../data/suggestedDiet";
 import { WeekClose } from "../data/weekClose";
 import { sessionForDate } from "../data/trainingPlan";
 import { loadWeekClose } from "../services/weekClose";
@@ -186,7 +188,11 @@ export function DashboardScreen({ navigation }: Props) {
   };
   const waterGoal = Math.max(2000, safeCount(profile.targets?.water_ml) || Math.round(safeCount(profile.metrics?.weight) * 35));
   const waterMl = safeCount(today.water_ml);
-  const meals = scheduleFor(profile.nutritionistPlan, profile.nutritionistPlanSource);
+  const meals = profile.nutritionistPlan?.trim()
+    ? scheduleFor(profile.nutritionistPlan, profile.nutritionistPlanSource)
+    : profile.mealsPerDay
+      ? suggestedSchedule(profile.mealsPerDay, profile.foodAnswers)
+      : [];
   const mealsDone = today.meals_done ?? {};
   const eaten = meals.filter((meal) => mealsDone[meal.id]).length;
 
@@ -278,7 +284,7 @@ export function DashboardScreen({ navigation }: Props) {
               ))}
             </>
           ) : (
-            <Text style={styles.dietOption}>O plano ainda não virou refeições. Abre a aba Dieta e salva o cardápio.</Text>
+            <Text style={styles.dietOption}>Sem plano de nutricionista. Na aba Dieta, diz quantas refeições faz no dia.</Text>
           )}
         </SoftTouch>
 
@@ -348,6 +354,9 @@ export function DashboardScreen({ navigation }: Props) {
 
         <SoftTouch style={styles.chatButton} onPress={() => navigation.navigate("Chat")}>
           <Text style={styles.chatButtonText}>Falar com o tutor</Text>
+        </SoftTouch>
+        <SoftTouch style={styles.leave} onPress={() => signOut(auth)}>
+          <Text style={styles.leaveText}>Sair da conta</Text>
         </SoftTouch>
       </ScrollView>
       </Reveal>
@@ -491,6 +500,8 @@ const styles = StyleSheet.create({
   habitTextActive: { color: colors.primary },
   chatButton: { backgroundColor: colors.primary, borderRadius: 14, paddingVertical: 16, alignItems: "center" },
   chatButtonText: { color: colors.background, fontWeight: "800" },
+  leave: { marginTop: 18, alignItems: "center", paddingVertical: 12 },
+  leaveText: { color: colors.textSecondary, fontWeight: "700" },
   coachCard: {
     backgroundColor: colors.surface,
     borderRadius: 18,
