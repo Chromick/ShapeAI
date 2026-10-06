@@ -9,5 +9,5 @@ export type MainTabParamList = {
   Home: undefined;
   Treino: undefined;
   Dieta: undefined;
-  Chat: undefined;
+  Chat: { seed?: string } | undefined;
 };

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { ActivityIndicator, Easing, StyleSheet, View } from "react-native";
+import { ActivityIndicator, AppState, Easing, StyleSheet, View } from "react-native";
 import { NavigationContainer, DefaultTheme } from "@react-navigation/native";
 import { createBottomTabNavigator } from "@react-navigation/bottom-tabs";
 import { createNativeStackNavigator } from "@react-navigation/native-stack";
@@ -9,6 +9,7 @@ import { StatusBar } from "expo-status-bar";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 import { MainTabParamList, RootStackParamList } from "./src/navigation/types";
 import { syncWatchSleepOnce } from "./src/services/daySync";
+import { runCaregiver } from "./src/services/caregiver";
 import { auth } from "./src/services/firebaseConfig";
 import { ChatScreen } from "./src/screens/ChatScreen";
 import { DashboardScreen } from "./src/screens/DashboardScreen";
@@ -92,9 +93,25 @@ export default function App() {
     return onAuthStateChanged(auth, (next) => {
       setUser(next);
       setBooting(false);
-      if (next) void syncWatchSleepOnce();
+      if (next) {
+        void syncWatchSleepOnce();
+        void runCaregiver();
+      }
     });
   }, []);
+
+  useEffect(() => {
+    if (!user) return;
+    const tick = () => void runCaregiver();
+    const interval = setInterval(tick, 15 * 60 * 1000);
+    const sub = AppState.addEventListener("change", (state) => {
+      if (state === "active") tick();
+    });
+    return () => {
+      clearInterval(interval);
+      sub.remove();
+    };
+  }, [user]);
 
   if (booting) {
     return (

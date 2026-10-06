@@ -1,28 +1,11 @@
-import { StyleSheet, Text, View } from "react-native";
+import { Image, StyleSheet, Text, View } from "react-native";
 import { brand } from "../theme/brand";
 import { colors } from "../theme/colors";
 
-const widths = [0.46, 0.72, 1];
+const logo = require("../../assets/logo-mark.png");
 
 export function Mark({ size = 28 }: { size?: number }) {
-  const bar = Math.max(3, Math.round(size * 0.16));
-  const gap = Math.max(2, Math.round(size * 0.1));
-  return (
-    <View style={{ width: size, height: bar * 3 + gap * 2, justifyContent: "center", gap }}>
-      {widths.map((width) => (
-        <View
-          key={width}
-          style={{
-            width: size * width,
-            height: bar,
-            borderRadius: bar,
-            backgroundColor: colors.primary,
-            alignSelf: "center",
-          }}
-        />
-      ))}
-    </View>
-  );
+  return <Image source={logo} style={{ width: size, height: size }} resizeMode="contain" />;
 }
 
 export function BrandLockup({ size = 36 }: { size?: number }) {

@@ -13,4 +13,5 @@ export const colors = {
   carbs: "#F2C14E",
   fat: "#7EC8C3",
   over: "#E85D4C",
+  gradient: ["#C8F24A", "#45C463", "#0F7F72"] as const,
 };

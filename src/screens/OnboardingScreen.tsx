@@ -15,6 +15,7 @@ import { auth, db } from "../services/firebaseConfig";
 import { Gender, Goal, calculateTargets } from "../services/nutrition";
 import { BrandLockup } from "../components/Mark";
 import { Reveal, SoftTouch } from "../components/motion";
+import { Edge } from "../components/Edge";
 import { colors } from "../theme/colors";
 
 type Props = NativeStackScreenProps<RootStackParamList, "Onboarding">;
@@ -150,6 +151,7 @@ export function OnboardingScreen({ navigation }: Props) {
       </View>
 
       <SoftTouch style={styles.button} onPress={handleSubmit} disabled={saving}>
+        <Edge />
         {saving ? <ActivityIndicator color={colors.background} /> : <Text style={styles.buttonText}>Gerar Planejamento</Text>}
       </SoftTouch>
     </ScrollView>
@@ -202,6 +204,7 @@ const styles = StyleSheet.create({
     paddingVertical: 16,
     alignItems: "center",
     marginTop: 28,
+    overflow: "hidden",
   },
   buttonText: { color: colors.background, fontWeight: "800", fontSize: 16 },
 });

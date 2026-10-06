@@ -5,12 +5,16 @@ import { File } from "expo-file-system";
 import { doc, onSnapshot, setDoc } from "firebase/firestore";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { CheckPop, Reveal, SoftTouch, easeLayout } from "../components/motion";
+import { Edge } from "../components/Edge";
 import { BRUNO_DIET_SOURCE, BRUNO_NUTRITIONIST_PLAN, isBrunoAccount } from "../data/brunoDiet";
 import { optionLabel, scheduleFor } from "../data/dietSchedule";
-import { FoodAnswer, foodById, slotNow, slotsForCount, suggestFood } from "../data/suggestedDiet";
+import { FoodAnswer, foodById, mealReminderSlots, shoppingList, slotNow, slotsForCount, suggestFood, suggestedSchedule } from "../data/suggestedDiet";
+import { consumePantry, coverageLine, pantrySpend, prepLine } from "../data/pantry";
+import { macrosFromMeals } from "../data/mealMacros";
 import { analyzeDietFile } from "../services/aiService";
 import { auth, db } from "../services/firebaseConfig";
-import { UserProfile, Vitamin, emptyDay, trackingDocId } from "../services/nutrition";
+import { DailyTracking, GroceryItem, UserProfile, Vitamin, emptyDay, trackingDocId } from "../services/nutrition";
+import { syncMealReminders } from "../services/reminders";
 import { colors } from "../theme/colors";
 
 const MAX_FILE_BYTES = 8 * 1024 * 1024;
@@ -31,6 +35,10 @@ export function DietScreen() {
   const [mealsPerDay, setMealsPerDay] = useState<number | undefined>();
   const [foodAnswers, setFoodAnswers] = useState<Record<string, FoodAnswer>>({});
   const [skipped, setSkipped] = useState<string[]>([]);
+  const [today, setToday] = useState<DailyTracking>(emptyDay());
+  const [pantry, setPantry] = useState<GroceryItem[]>([]);
+  const [shoppingHelp, setShoppingHelp] = useState(true);
+  const [shopBudget, setShopBudget] = useState("");
 
   useEffect(() => {
     const uid = auth.currentUser?.uid;
@@ -45,6 +53,9 @@ export function DietScreen() {
       setVitamins(data.vitamins ?? []);
       setMealsPerDay(data.mealsPerDay || undefined);
       setFoodAnswers(data.foodAnswers ?? {});
+      setPantry(data.pantry ?? []);
+      setShoppingHelp(data.shoppingHelp !== false);
+      setShopBudget(data.shopBudget != null ? String(data.shopBudget) : "");
       const email = auth.currentUser?.email;
       if (!currentPlan.trim() && !data.nutritionistPlanSource && isBrunoAccount(email, data.name)) {
         setPlan(BRUNO_NUTRITIONIST_PLAN);
@@ -56,7 +67,8 @@ export function DietScreen() {
       }
     });
     const unsubDay = onSnapshot(doc(db, "daily_tracking", trackingDocId(uid)), (snapshot) => {
-      const data = snapshot.exists() ? snapshot.data() : emptyDay();
+      const data = snapshot.exists() ? (snapshot.data() as DailyTracking) : emptyDay();
+      setToday(data);
       setTaken(data.vitamins_taken ?? []);
       setMealsDone(data.meals_done ?? {});
     });
@@ -65,6 +77,11 @@ export function DietScreen() {
       unsubDay();
     };
   }, []);
+
+  useEffect(() => {
+    const board = scheduleFor(plan, planSource);
+    void syncMealReminders(mealReminderSlots(board, mealsPerDay), mealsDone);
+  }, [plan, planSource, mealsPerDay, mealsDone]);
 
   async function savePlan() {
     const uid = auth.currentUser?.uid;
@@ -122,6 +139,34 @@ export function DietScreen() {
     await setDoc(doc(db, "users", uid), { mealsPerDay: count }, { merge: true });
   }
 
+  async function persistMealMacros(
+    uid: string,
+    nextDone: Record<string, string>,
+    meals: { id: string; options: { id: string; label: string }[] }[],
+  ) {
+    const previous = macrosFromMeals(meals, mealsDone);
+    const next = macrosFromMeals(meals, nextDone);
+    await setDoc(
+      doc(db, "daily_tracking", trackingDocId(uid)),
+      {
+        meals_done: nextDone,
+        total_calories: Math.max(0, (today.total_calories || 0) - previous.calories + next.calories),
+        total_protein: Math.max(0, (today.total_protein || 0) - previous.protein + next.protein),
+        total_carbs: Math.max(0, (today.total_carbs || 0) - previous.carbs + next.carbs),
+        total_fats: Math.max(0, (today.total_fats || 0) - previous.fats + next.fats),
+      },
+      { merge: true },
+    );
+    void syncMealReminders(mealReminderSlots(meals, mealsPerDay), nextDone);
+  }
+
+  async function savePantry(next: GroceryItem[]) {
+    const uid = auth.currentUser?.uid;
+    if (!uid) return;
+    setPantry(next);
+    await setDoc(doc(db, "users", uid), { pantry: next }, { merge: true });
+  }
+
   async function answerFood(foodId: string, slotId: string, answer: FoodAnswer | "later") {
     const uid = auth.currentUser?.uid;
     if (!uid) return;
@@ -135,7 +180,10 @@ export function DietScreen() {
     if (answer === "eats") {
       const nextMeals = { ...mealsDone, [slotId]: foodId };
       setMealsDone(nextMeals);
-      await setDoc(doc(db, "daily_tracking", trackingDocId(uid)), { meals_done: nextMeals }, { merge: true });
+      const slots = suggestedSchedule(mealsPerDay || 4, nextAnswers);
+      await persistMealMacros(uid, nextMeals, slots);
+      const food = foodById(foodId);
+      if (food) await savePantry(consumePantry(pantry, food.id, food.label));
     }
     await setDoc(doc(db, "users", uid), { foodAnswers: nextAnswers }, { merge: true });
   }
@@ -154,9 +202,19 @@ export function DietScreen() {
     if (!uid) return;
     const next = { ...mealsDone };
     if (next[mealId] === optionId) delete next[mealId];
-    else next[mealId] = optionId;
+    else {
+      next[mealId] = optionId;
+      const board = scheduleFor(plan, planSource);
+      const option = board.find((meal) => meal.id === mealId)?.options.find((item) => item.id === optionId);
+      if (option) await savePantry(consumePantry(pantry, option.id, option.label));
+    }
     setMealsDone(next);
-    await setDoc(doc(db, "daily_tracking", trackingDocId(uid)), { meals_done: next }, { merge: true });
+    const board = scheduleFor(plan, planSource);
+    await persistMealMacros(
+      uid,
+      next,
+      board.length ? board : suggestedSchedule(mealsPerDay || 4, foodAnswers),
+    );
   }
 
   async function addVitamin() {
@@ -190,6 +248,9 @@ export function DietScreen() {
   const pending = vitamins.filter((vitamin) => !taken.includes(vitamin.id)).length;
   const meals = scheduleFor(plan, planSource);
   const eaten = meals.filter((meal) => mealsDone[meal.id]).length;
+  const bag = shoppingList(foodAnswers);
+  const cover = coverageLine(meals, mealsDone, pantry);
+  const leftoverPrep = prepLine(pantry);
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
@@ -208,12 +269,14 @@ export function DietScreen() {
               count={mealsPerDay}
               answers={foodAnswers}
               skipped={skipped}
+              pantry={pantry}
               chosenId={mealsDone[slotNow(slotsForCount(mealsPerDay)).id]}
               onAnswer={answerFood}
               onResetCount={clearMealCount}
             />
           ) : (
             <View style={styles.meal}>
+              <Edge />
               <Text style={styles.vitaminName}>Quantas refeições você faz no dia?</Text>
               <View style={styles.countRow}>
                 {[3, 4, 5, 6].map((count) => (
@@ -230,13 +293,15 @@ export function DietScreen() {
           <>
             <Text style={styles.section}>Hoje</Text>
             <Text style={styles.lead}>
-              {eaten} de {meals.length} refeições marcadas. Escolhe a opção que comeu. A nutricionista pediu intervalo de 3 ou 4 horas.
+              {eaten} de {meals.length} refeições. A barra de kcal no Início soma as porções escritas no plano, sem inventar refeição.
             </Text>
+            {cover ? <Text style={styles.dose}>{cover}</Text> : null}
             {meals.map((meal) => {
               const chosen = mealsDone[meal.id];
               const open = openMeal === meal.id;
               return (
                 <View key={meal.id} style={styles.meal}>
+                  <Edge />
                   <SoftTouch
                     onPress={() => {
                       easeLayout();
@@ -278,6 +343,88 @@ export function DietScreen() {
           </>
         ) : null}
 
+        {bag.length && !plan.trim() ? (
+          <View style={styles.meal}>
+            <Edge />
+            <Text style={styles.vitaminName}>Lista de compra</Text>
+            <Text style={styles.dose}>Do que você marcou que come.</Text>
+            {bag.map((item) => (
+              <Text key={item} style={styles.note}>
+                {item}
+              </Text>
+            ))}
+          </View>
+        ) : null}
+
+        <View style={styles.meal}>
+          <Edge />
+          <Text style={styles.vitaminName}>Despensa</Text>
+          <Text style={styles.dose}>
+            Fala no tutor o que comprou, a quantidade e o preço. Ele sugere prato com isso. Dica de mercado dá para ligar ou desligar.
+          </Text>
+          <SoftTouch
+            style={[styles.option, shoppingHelp && styles.optionOn]}
+            onPress={async () => {
+              const uid = auth.currentUser?.uid;
+              if (!uid) return;
+              const next = !shoppingHelp;
+              setShoppingHelp(next);
+              await setDoc(doc(db, "users", uid), { shoppingHelp: next }, { merge: true });
+            }}
+          >
+            <Text style={[styles.optionText, shoppingHelp && styles.optionTextOn]}>
+              {shoppingHelp ? "Dicas do que comprar: ligadas" : "Dicas do que comprar: desligadas"}
+            </Text>
+          </SoftTouch>
+          <TextInput
+            style={styles.input}
+            placeholder="Teto de gasto, ex: 150"
+            placeholderTextColor={colors.textSecondary}
+            keyboardType="decimal-pad"
+            value={shopBudget}
+            onChangeText={setShopBudget}
+            onEndEditing={async () => {
+              const uid = auth.currentUser?.uid;
+              if (!uid) return;
+              const amount = parseFloat(shopBudget.replace(",", "."));
+              const value = Number.isFinite(amount) && amount > 0 ? amount : null;
+              await setDoc(doc(db, "users", uid), { shopBudget: value }, { merge: true });
+            }}
+          />
+          {shopBudget && pantrySpend(pantry) > parseFloat(shopBudget.replace(",", ".") || "0") ? (
+            <Text style={styles.note}>
+              Soma na despensa R$ {pantrySpend(pantry).toFixed(2).replace(".", ",")} passou do teto.
+            </Text>
+          ) : null}
+          {leftoverPrep ? <Text style={styles.note}>{leftoverPrep}</Text> : null}
+          {pantry.length ? (
+            pantry.map((item) => (
+              <View key={item.id} style={styles.vitamin}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.vitaminName}>{item.name}</Text>
+                  <Text style={styles.dose}>
+                    {item.quantity}
+                    {item.price != null ? ` · R$ ${item.price.toFixed(2).replace(".", ",")}` : ""}
+                  </Text>
+                </View>
+                <SoftTouch
+                  onPress={async () => {
+                    const uid = auth.currentUser?.uid;
+                    if (!uid) return;
+                    const next = pantry.filter((row) => row.id !== item.id);
+                    setPantry(next);
+                    await setDoc(doc(db, "users", uid), { pantry: next }, { merge: true });
+                  }}
+                >
+                  <Text style={styles.remove}>Tirar</Text>
+                </SoftTouch>
+              </View>
+            ))
+          ) : (
+            <Text style={styles.dose}>Ainda vazia. No tutor: “comprei 1 kg de frango, R$ 22”.</Text>
+          )}
+        </View>
+
         <SoftTouch
           onPress={() => {
             easeLayout();
@@ -300,6 +447,7 @@ export function DietScreen() {
           }}
         />
         <SoftTouch style={styles.button} onPress={savePlan}>
+          <Edge />
           <Text style={styles.buttonText}>{saved ? "Plano salvo" : "Salvar plano"}</Text>
         </SoftTouch>
         <SoftTouch style={styles.secondary} onPress={sendDietFile} disabled={reading}>
@@ -367,6 +515,7 @@ function Suggestion({
   count,
   answers,
   skipped,
+  pantry,
   chosenId,
   onAnswer,
   onResetCount,
@@ -374,16 +523,18 @@ function Suggestion({
   count: number;
   answers: Record<string, FoodAnswer>;
   skipped: string[];
+  pantry?: GroceryItem[];
   chosenId?: string;
   onAnswer: (foodId: string, slotId: string, answer: FoodAnswer | "later") => void;
   onResetCount: () => void;
 }) {
   const slots = slotsForCount(count);
   const slot = slotNow(slots);
-  const food = suggestFood(slot.id, answers, skipped);
+  const food = suggestFood(slot.id, answers, skipped, pantry);
   const chosen = chosenId ? foodById(chosenId) : undefined;
   return (
     <View style={styles.meal}>
+      <Edge />
       <Text style={styles.vitaminName}>Agora · {slot.title}</Text>
       <Text style={styles.dose}>{count} refeições no dia. A sugestão muda com o horário.</Text>
       {chosen ? <Text style={styles.note}>Marcado: {chosen.label}</Text> : null}
@@ -432,6 +583,7 @@ const styles = StyleSheet.create({
     paddingVertical: 14,
     alignItems: "center",
     marginTop: 10,
+    overflow: "hidden",
   },
   buttonText: { color: colors.background, fontWeight: "800" },
   analysis: {
@@ -475,6 +627,7 @@ const styles = StyleSheet.create({
     marginBottom: 8,
     borderWidth: 1,
     borderColor: colors.border,
+    overflow: "hidden",
   },
   mealHead: { flexDirection: "row", gap: 10 },
   mealText: { flex: 1 },

@@ -49,6 +49,8 @@ export type StoredPlan = {
   progression?: Progression;
   progressionReason?: string;
   sessions: TrainingSession[];
+  weekStart?: string;
+  weekMap?: Record<string, string>;
 };
 
 export function progressionFor(
@@ -361,8 +363,180 @@ export function buildPlan(
   return { daysPerWeek, priorities: unique, progression, sessions };
 }
 
-export function sessionForDate(plan: StoredPlan, date: Date = new Date()): TrainingSession {
+function atNoon(date: Date): Date {
+  const copy = new Date(date);
+  copy.setHours(12, 0, 0, 0);
+  return copy;
+}
+
+export function isoDate(date: Date = new Date()): string {
+  const copy = new Date(date);
+  copy.setMinutes(copy.getMinutes() - copy.getTimezoneOffset());
+  return copy.toISOString().split("T")[0];
+}
+
+export function mondayOf(date: Date = new Date()): Date {
+  const today = atNoon(date);
+  const weekday = today.getDay();
+  const sinceMonday = weekday === 0 ? 6 : weekday - 1;
+  const monday = new Date(today);
+  monday.setDate(today.getDate() - sinceMonday);
+  return monday;
+}
+
+function mondayIndex(weekday: number): number {
+  return weekday === 0 ? 6 : weekday - 1;
+}
+
+function addDays(date: Date, days: number): Date {
+  const next = atNoon(date);
+  next.setDate(next.getDate() + days);
+  return next;
+}
+
+function sundayOf(date: Date = new Date()): Date {
+  return addDays(mondayOf(date), 6);
+}
+
+function calendarSession(plan: StoredPlan, date: Date): TrainingSession {
   return plan.sessions.find((session) => session.weekday === date.getDay()) ?? plan.sessions[0];
+}
+
+export function trainingOrder(plan: StoredPlan): TrainingSession[] {
+  return plan.sessions
+    .filter((session) => !session.rest)
+    .sort((a, b) => mondayIndex(a.weekday) - mondayIndex(b.weekday));
+}
+
+export function sessionLetter(plan: StoredPlan, sessionId: string): string {
+  const index = trainingOrder(plan).findIndex((session) => session.id === sessionId);
+  return index >= 0 ? String.fromCharCode(65 + index) : "";
+}
+
+export function sessionForDate(plan: StoredPlan, date: Date = new Date()): TrainingSession {
+  const start = isoDate(mondayOf(date));
+  if (plan.weekStart === start && plan.weekMap) {
+    const mapped = plan.weekMap[isoDate(date)];
+    if (mapped) {
+      return plan.sessions.find((session) => session.id === mapped) ?? calendarSession(plan, date);
+    }
+  }
+  return calendarSession(plan, date);
+}
+
+export function weekAgenda(plan: StoredPlan, date: Date = new Date()): { date: Date; session: TrainingSession }[] {
+  const monday = mondayOf(date);
+  return [0, 1, 2, 3, 4, 5, 6].map((offset) => {
+    const day = addDays(monday, offset);
+    return { date: day, session: sessionForDate(plan, day) };
+  });
+}
+
+export function matchSession(plan: StoredPlan, hint: string, now: Date = new Date()): TrainingSession | undefined {
+  const raw = hint.trim().toLowerCase();
+  if (!raw) return sessionForDate(plan, now);
+  const train = trainingOrder(plan);
+  if (/ontem/.test(raw)) {
+    const yesterday = addDays(now, -1);
+    const previous = sessionForDate(plan, yesterday);
+    if (!previous.rest) return previous;
+    return train[0];
+  }
+  const letter = raw.replace(/treino\s*/g, "").trim();
+  const fromLetter = letter.match(/^([a-e])$/);
+  if (fromLetter) {
+    const index = fromLetter[1].charCodeAt(0) - 97;
+    return train[index];
+  }
+  return (
+    train.find((session) => session.id.toLowerCase() === raw) ??
+    train.find((session) => session.title.toLowerCase() === raw) ??
+    train.find((session) => session.title.toLowerCase().includes(raw)) ??
+    plan.sessions.find((session) => session.dayLabel.toLowerCase().includes(raw) && !session.rest) ??
+    train.find((session) => sessionLetter(plan, session.id).toLowerCase() === letter)
+  );
+}
+
+function restOn(plan: StoredPlan, weekday: number): TrainingSession | undefined {
+  return plan.sessions.find((session) => session.rest && session.weekday === weekday) ?? plan.sessions.find((session) => session.rest);
+}
+
+export function applySessionToday(
+  plan: StoredPlan,
+  hint: string,
+  now: Date = new Date(),
+): { plan: StoredPlan; message: string } | { error: string } {
+  const chosen = matchSession(plan, hint, now);
+  if (!chosen || chosen.rest) {
+    return { error: "Não achei esse treino na ficha. Fala A, B, C ou o nome do dia." };
+  }
+  const train = trainingOrder(plan);
+  if (!train.some((session) => session.id === chosen.id)) {
+    return { error: "Esse dia é descanso na ficha." };
+  }
+  const already = sessionForDate(plan, now);
+  if (already.id === chosen.id && !/ontem/.test(hint.trim().toLowerCase())) {
+    const letter = sessionLetter(plan, chosen.id);
+    return {
+      plan,
+      message: `Hoje já é o treino ${letter} (${chosen.title}).`,
+    };
+  }
+
+  const monday = mondayOf(now);
+  const sunday = sundayOf(now);
+  const today = atNoon(now);
+  const map: Record<string, string> = {};
+  const sameWeek = plan.weekStart === isoDate(monday);
+
+  for (let cursor = new Date(monday); cursor < today; cursor = addDays(cursor, 1)) {
+    const iso = isoDate(cursor);
+    map[iso] = sameWeek && plan.weekMap?.[iso] ? plan.weekMap[iso] : calendarSession(plan, cursor).id;
+  }
+
+  if (/ontem/.test(hint.trim().toLowerCase())) {
+    const yesterday = addDays(today, -1);
+    if (yesterday.getTime() >= monday.getTime()) {
+      const rest = restOn(plan, yesterday.getDay());
+      if (rest) map[isoDate(yesterday)] = rest.id;
+    }
+  }
+
+  map[isoDate(today)] = chosen.id;
+
+  const used = new Set(Object.values(map));
+  const leftover = train.filter((session) => !used.has(session.id));
+  const free: Date[] = [];
+  for (let cursor = addDays(today, 1); cursor <= sunday; cursor = addDays(cursor, 1)) {
+    free.push(new Date(cursor));
+  }
+
+  leftover.forEach((session, step) => {
+    const slot = free[step];
+    if (!slot) return;
+    map[isoDate(slot)] = session.id;
+  });
+
+  free.slice(leftover.length).forEach((slot) => {
+    const rest = restOn(plan, slot.getDay());
+    if (rest) map[isoDate(slot)] = rest.id;
+  });
+
+  const next: StoredPlan = { ...plan, weekStart: isoDate(monday), weekMap: map };
+  const remaining = leftover
+    .map((session) => {
+      const when = weekAgenda(next, today).find((item) => item.session.id === session.id);
+      const day = when ? DAY_NAMES[when.date.getDay()] : "a encaixar na próxima semana";
+      return `${sessionLetter(next, session.id)} ${session.title} na ${day}`;
+    })
+    .join("; ");
+  const letter = sessionLetter(next, chosen.id);
+  return {
+    plan: next,
+    message: remaining
+      ? `Hoje é o treino ${letter} (${chosen.title}). O que faltava foi empurrado: ${remaining}.`
+      : `Hoje é o treino ${letter} (${chosen.title}). Não resta outro treino nesta semana.`,
+  };
 }
 
 export function volumeOf(plan: StoredPlan): { muscle: string; sets: number; priority: boolean }[] {
@@ -402,6 +576,7 @@ O formato já foi escolhido pelos dados: idade, quanto a pessoa treina e o sono.
 Séries comuns servem para idade mais alta, treino leve ou sono ruim. Até a falha só cabe com menos de 35 anos, treino intenso e noite boa. Tempo, como a prancha, não tem carga.
 Sono ruim ou déficit: não sobe carga e não manda ir até a falha. Mantém a última carga.
 Se a pessoa quiser outro formato, explica a diferença. A ficha só muda quando ela gera de novo na aba Treino, e o app recalcula o formato. Não reescreve a divisão sozinho.
+Se faltou um dia de treino e ela fez (ou vai fazer) o treino atrasado hoje, use apply_training_today. Isso empurra o que ainda falta e tira o descanso que não cabe mais. Não deixe a aba Treino no dia antigo.
 Se a pessoa trocar um exercício porque o aparelho estava ocupado, use swap_exercise no mesmo grupamento e no dia em que ela treinou. A troca fica gravada na ficha.`;
 }
 
@@ -415,6 +590,11 @@ export function planScript(plan: StoredPlan): string {
           .join("; ")}`,
     )
     .join("\n");
+}
+
+export function alternativesFor(exercise: { muscleId: MuscleId; name: string }): string[] {
+  const muscle = MUSCLES.find((item) => item.id === exercise.muscleId);
+  return (muscle?.variations.map((item) => item.name) ?? []).filter((name) => name !== exercise.name);
 }
 
 export function swapExercise(

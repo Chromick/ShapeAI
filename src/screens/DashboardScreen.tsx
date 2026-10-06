@@ -14,12 +14,15 @@ import { CommonActions } from "@react-navigation/native";
 import { signOut } from "firebase/auth";
 import { doc, getDoc, onSnapshot, setDoc } from "firebase/firestore";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { optionLabel, scheduleFor } from "../data/dietSchedule";
-import { suggestedSchedule } from "../data/suggestedDiet";
+import { scheduleFor } from "../data/dietSchedule";
+import { mealReminderSlots, suggestedSchedule } from "../data/suggestedDiet";
+import { coverageLine, prepLine } from "../data/pantry";
 import { WeekClose } from "../data/weekClose";
-import { sessionForDate } from "../data/trainingPlan";
+import { weekBounds } from "../data/weekClose";
+import { sessionForDate, sessionLetter } from "../data/trainingPlan";
 import { loadWeekClose } from "../services/weekClose";
-import { ensureWaterReminders } from "../services/reminders";
+import { syncMealReminders, ensureWaterReminders } from "../services/reminders";
+import { clearTodayTrainingAlert } from "../services/caregiver";
 import { MainTabParamList } from "../navigation/types";
 import { auth, db } from "../services/firebaseConfig";
 import {
@@ -34,6 +37,7 @@ import {
 } from "../services/nutrition";
 import { BrandLockup } from "../components/Mark";
 import { GrowBar, Reveal, SoftTouch } from "../components/motion";
+import { Edge } from "../components/Edge";
 import { colors } from "../theme/colors";
 
 type Props = BottomTabScreenProps<MainTabParamList, "Home">;
@@ -56,6 +60,7 @@ export function DashboardScreen({ navigation }: Props) {
   const [waterDraft, setWaterDraft] = useState("");
   const [reminders, setReminders] = useState<"on" | "denied" | "unavailable" | "pending">("pending");
   const [weekClose, setWeekClose] = useState<WeekClose | null>(null);
+  const [routineDraft, setRoutineDraft] = useState("");
 
   useEffect(() => {
     const uid = auth.currentUser?.uid;
@@ -71,11 +76,12 @@ export function DashboardScreen({ navigation }: Props) {
       }
       const data = snapshot.data() as UserProfile;
       setProfile(data);
+      setRoutineDraft(data.routineNote ?? "");
       setWeighOpen(needsWeighIn(data));
 
-      const dates = Array.from({ length: 7 }, (_, index) => {
+      const dates = Array.from({ length: 21 }, (_, index) => {
         const date = new Date();
-        date.setDate(date.getDate() - (6 - index));
+        date.setDate(date.getDate() - (20 - index));
         return getLocalISODate(date);
       });
       const rows = await Promise.all(
@@ -86,10 +92,18 @@ export function DashboardScreen({ navigation }: Props) {
       );
       setHistory(rows);
 
-      unsubscribe = onSnapshot(doc(db, "daily_tracking", trackingDocId(uid)), (day) => {
+      const unsubUser = onSnapshot(doc(db, "users", uid), (userSnap) => {
+        if (!userSnap.exists()) return;
+        setProfile(userSnap.data() as UserProfile);
+      });
+      const unsubDay = onSnapshot(doc(db, "daily_tracking", trackingDocId(uid)), (day) => {
         setToday(day.exists() ? (day.data() as DailyTracking) : emptyDay());
         setLoading(false);
       });
+      unsubscribe = () => {
+        unsubUser();
+        unsubDay();
+      };
     });
 
     return () => unsubscribe();
@@ -98,6 +112,12 @@ export function DashboardScreen({ navigation }: Props) {
   useEffect(() => {
     ensureWaterReminders().then(setReminders);
   }, []);
+
+  useEffect(() => {
+    if (!profile) return;
+    const board = scheduleFor(profile.nutritionistPlan, profile.nutritionistPlanSource);
+    void syncMealReminders(mealReminderSlots(board, profile.mealsPerDay), today.meals_done ?? {});
+  }, [profile, today.meals_done]);
 
   useEffect(() => {
     const uid = auth.currentUser?.uid;
@@ -162,6 +182,14 @@ export function DashboardScreen({ navigation }: Props) {
     );
   }
 
+  async function saveRoutine() {
+    const uid = auth.currentUser?.uid;
+    const text = routineDraft.trim();
+    if (!uid || !text) return;
+    await setDoc(doc(db, "users", uid), { routineNote: text }, { merge: true });
+    setProfile((current) => (current ? { ...current, routineNote: text } : current));
+  }
+
   async function toggleHabit(field: "workout_done") {
     const uid = auth.currentUser?.uid;
     if (!uid) return;
@@ -170,6 +198,7 @@ export function DashboardScreen({ navigation }: Props) {
       { [field]: !today[field] },
       { merge: true },
     );
+    if (!today.workout_done) await clearTodayTrainingAlert();
   }
 
   if (loading || !profile) {
@@ -195,109 +224,133 @@ export function DashboardScreen({ navigation }: Props) {
       : [];
   const mealsDone = today.meals_done ?? {};
   const eaten = meals.filter((meal) => mealsDone[meal.id]).length;
+  const workoutToday = profile.trainingPlan ? sessionForDate(profile.trainingPlan) : null;
+  const workoutLetter = workoutToday && !workoutToday.rest && profile.trainingPlan
+    ? sessionLetter(profile.trainingPlan, workoutToday.id)
+    : "";
+  const nextMeal = meals.find((meal) => !mealsDone[meal.id]);
+  const cover = coverageLine(meals, mealsDone, profile.pantry);
+  const leftover = prepLine(profile.pantry);
+  const weekDots = history.slice(-7);
+  const weightPoints = history
+    .map((item) => (item.date === getLocalISODate() ? today.weight ?? item.data?.weight : item.data?.weight))
+    .filter((value): value is number => typeof value === "number" && Number.isFinite(value) && value > 0);
+  const todayLabel = new Date().toLocaleDateString("pt-BR", {
+    weekday: "long",
+    day: "numeric",
+    month: "long",
+  });
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
       <Reveal>
       <ScrollView contentContainerStyle={styles.content}>
-        <View style={styles.brandRow}>
-          <BrandLockup size={26} />
+        <View style={styles.header}>
+          <BrandLockup size={24} />
+          <SoftTouch onPress={() => signOut(auth)} hitSlop={12}>
+            <Text style={styles.leaveText}>Sair</Text>
+          </SoftTouch>
         </View>
         <Text style={styles.greeting}>Olá, {profile.name || "Visitante"}</Text>
+        <Text style={styles.dateLine}>{todayLabel}</Text>
 
-        {weekClose ? (
-          <View style={styles.card}>
-            <Text style={styles.section}>{weekClose.title}</Text>
-            <Text style={styles.closeRange}>{weekClose.range}</Text>
-            <Text style={styles.closeLine}>{weekClose.training}</Text>
-            <Text style={styles.closeLine}>{weekClose.meals}</Text>
-            <Text style={styles.closeLine}>{weekClose.water}</Text>
-            <Text style={styles.closeLine}>{weekClose.weight}</Text>
-            <Text style={styles.closeLine}>{weekClose.sleep}</Text>
-            <Text style={styles.closeLoad}>{weekClose.load}</Text>
+        <View style={styles.card}>
+          <Edge />
+          <Text style={styles.section}>Rotina</Text>
+          <Text style={styles.tileBody}>Horário de treino, fim de semana, o que o cuidador precisa lembrar.</Text>
+          <TextInput
+            style={styles.waterInput}
+            placeholder="Treino depois do trabalho"
+            placeholderTextColor={colors.textSecondary}
+            value={routineDraft}
+            onChangeText={setRoutineDraft}
+          />
+          <SoftTouch style={[styles.waterAddButton, { marginTop: 8, alignSelf: "flex-start", paddingVertical: 10 }]} onPress={saveRoutine}>
+            <Text style={styles.waterAddText}>Guardar</Text>
+          </SoftTouch>
+        </View>
+
+        {weekBounds().closing && weekClose ? (
+          <SoftTouch
+            style={[styles.chatButton, { marginBottom: 14 }]}
+            onPress={() =>
+              navigation.navigate("Chat", {
+                seed: `Fecha a semana.\n${weekClose.script}\nDiz se a carga sobe e o que ajustar.`,
+              })
+            }
+          >
+            <Edge />
+            <Text style={styles.chatButtonText}>Fechar a semana</Text>
+          </SoftTouch>
+        ) : null}
+
+        {profile.careMemory?.lastAlert ? (
+          <View style={styles.careCard}>
+            <Edge />
+            <Text style={styles.kicker}>Cuidador</Text>
+            <Text style={styles.tileTitle}>{profile.careMemory.lastAlert}</Text>
           </View>
         ) : null}
 
-        <View style={styles.card}>
-          <Text style={styles.section}>Semana</Text>
-          {history.map((item) => {
-            const day = item.date === getLocalISODate() ? today : item.data;
-            const date = new Date(`${item.date}T12:00:00`);
-            const marked = Object.keys(day?.meals_done ?? {}).length;
-            const session = profile.trainingPlan ? sessionForDate(profile.trainingPlan, date) : null;
-            const trained = session?.rest ? "descanso" : day?.workout_done ? "treinou" : "não treinou";
-            const weight = safeCount(day?.weight);
-            return (
-              <View key={item.date} style={[styles.weekRow, item.date === getLocalISODate() && styles.weekToday]}>
-                <View style={styles.weekHead}>
-                  <Text style={styles.weekDay}>
-                    {weekDays[date.getDay()]} {date.getDate()}
-                  </Text>
-                  <Text style={styles.weekWeight}>{weight > 0 ? `${String(weight).replace(".", ",")} kg` : ""}</Text>
-                </View>
-                <Text style={styles.weekDetail}>
-                  Dieta {meals.length ? `${marked}/${meals.length}` : "—"} · {trained} · Água {liters(safeCount(day?.water_ml))} L
-                </Text>
-              </View>
-            );
-          })}
-          <Text style={styles.waterHint}>Peso de hoje, em jejum se for o dia de atualizar.</Text>
-          <View style={styles.waterAdd}>
-            <TextInput
-              style={styles.waterInput}
-              placeholder="kg"
-              placeholderTextColor={colors.textSecondary}
-              keyboardType="decimal-pad"
-              value={newWeight}
-              onChangeText={setNewWeight}
-            />
-            <SoftTouch style={styles.waterAddButton} onPress={handleWeighIn}>
-              <Text style={styles.waterAddText}>Salvar peso</Text>
+        <View style={styles.todayRow}>
+          <View style={styles.todayTile}>
+            <Edge />
+            <SoftTouch onPress={() => navigation.navigate("Treino")}>
+              <Text style={styles.kicker}>Treino</Text>
+              <Text style={styles.tileTitle} numberOfLines={2}>
+                {workoutToday
+                  ? `${workoutLetter ? `${workoutLetter} · ` : ""}${workoutToday.title}`
+                  : "Definir ficha"}
+              </Text>
+            </SoftTouch>
+            <SoftTouch
+              style={[styles.miniHabit, today.workout_done && styles.miniHabitOn]}
+              onPress={() => toggleHabit("workout_done")}
+            >
+              <Text style={[styles.miniHabitText, today.workout_done && styles.miniHabitTextOn]}>
+                {today.workout_done ? "Feito" : "Marcar"}
+              </Text>
             </SoftTouch>
           </View>
+          <SoftTouch style={styles.todayTile} onPress={() => navigation.navigate("Dieta")}>
+            <Edge />
+            <Text style={styles.kicker}>Dieta</Text>
+            <Text style={styles.tileTitle}>
+              {meals.length ? `${eaten} de ${meals.length}` : "Sem cardápio"}
+            </Text>
+            <Text style={styles.tileBody} numberOfLines={3}>
+              {cover ||
+                (nextMeal
+                  ? `Próxima: ${nextMeal.title}`
+                  : meals.length
+                    ? "Refeições do dia marcadas."
+                    : "Abre a aba Dieta.")}
+            </Text>
+          </SoftTouch>
+        </View>
+
+        {leftover ? (
+          <View style={styles.card}>
+            <Edge />
+            <Text style={styles.kicker}>Preparo</Text>
+            <Text style={styles.tileTitle}>{leftover}</Text>
+          </View>
+        ) : null}
+
+        <View style={styles.statGrid}>
+          <StatCell label="kcal" value={Math.round(today.total_calories)} max={targets.calories} color={colors.calories} />
+          <StatCell label="prot" value={Math.round(today.total_protein)} max={targets.protein} color={colors.primary} />
+          <StatCell label="carb" value={Math.round(today.total_carbs)} max={targets.carb} color={colors.carbs} />
+          <StatCell label="água" value={liters(waterMl)} maxLabel={`${liters(waterGoal)} L`} color={colors.fat} />
         </View>
 
         <View style={styles.card}>
-          <ProgressBar label="🔥 Calorias Totais" current={today.total_calories} target={targets.calories} suffix=" kcal" color={colors.calories} />
-          <ProgressBar label="🥩 Proteína" current={today.total_protein} target={targets.protein} suffix="g" color={colors.primary} />
-          <ProgressBar label="🍚 Carboidratos" current={today.total_carbs} target={targets.carb} suffix="g" color={colors.carbs} />
-          <ProgressBar label="🥑 Gorduras" current={today.total_fats} target={targets.fat} suffix="g" color={colors.fat} />
-        </View>
-
-        <SoftTouch style={styles.card} onPress={() => navigation.navigate("Dieta")}>
-          <Text style={styles.section}>Dieta de hoje</Text>
-          {meals.length ? (
-            <>
-              <Text style={styles.dietCount}>
-                {eaten} de {meals.length} refeições marcadas
-              </Text>
-              {meals.map((meal) => (
-                <View key={meal.id} style={styles.dietRow}>
-                  <Text style={styles.dietCheck}>{mealsDone[meal.id] ? "✓" : "○"}</Text>
-                  <View style={styles.dietCopy}>
-                    <Text style={styles.dietTitle}>{meal.title}</Text>
-                    <Text style={styles.dietOption} numberOfLines={1}>
-                      {optionLabel(meal, mealsDone[meal.id])}
-                    </Text>
-                  </View>
-                </View>
-              ))}
-            </>
-          ) : (
-            <Text style={styles.dietOption}>Sem plano de nutricionista. Na aba Dieta, diz quantas refeições faz no dia.</Text>
-          )}
-        </SoftTouch>
-
-        <View style={styles.card}>
-          <Text style={styles.section}>Água</Text>
-          <ProgressBar label="💧 Água" current={waterMl} target={waterGoal} suffix=" ml" color={colors.primary} />
-          <Text style={styles.waterHint}>
-            Meta {liters(waterGoal)} L, no mínimo 2 L. Marca mais ou menos o que tomou.
-          </Text>
+          <Edge />
+          <Text style={styles.section}>Água agora</Text>
           <View style={styles.waterAmounts}>
             {waterAmounts.map((amount) => (
               <SoftTouch key={amount} style={styles.waterChip} onPress={() => addWater(amount)}>
-                <Text style={styles.waterChipText}>{amount} ml</Text>
+                <Text style={styles.waterChipText}>{amount}</Text>
               </SoftTouch>
             ))}
           </View>
@@ -311,52 +364,106 @@ export function DashboardScreen({ navigation }: Props) {
               onChangeText={setWaterDraft}
             />
             <SoftTouch style={styles.waterAddButton} onPress={() => addWater(parseFloat(waterDraft.replace(",", ".")))}>
-              <Text style={styles.waterAddText}>Adicionar</Text>
+              <Text style={styles.waterAddText}>Somar</Text>
             </SoftTouch>
           </View>
           {(today.water_entries ?? []).length ? (
             <SoftTouch onPress={undoWater}>
-              <Text style={styles.waterUndo}>Desfazer o último, {(today.water_entries ?? []).at(-1)} ml</Text>
+              <Text style={styles.waterUndo}>Desfazer {(today.water_entries ?? []).at(-1)} ml</Text>
             </SoftTouch>
           ) : null}
-          <Text style={styles.waterHint}>
-            {reminders === "on"
-              ? "Avisos às 8, 10, 12, 14, 16, 18 e 20."
-              : reminders === "denied"
-                ? "Os avisos estão desligados nas permissões do celular. A água continua aqui para marcar."
-                : reminders === "unavailable"
-                  ? "Os avisos do dia entram quando o Shape estiver instalado. Enquanto isso, marca aqui quanto tomou."
-                  : "Ligando os avisos do dia."}
-          </Text>
+          {reminders === "on" ? null : (
+            <Text style={styles.tileBody}>
+              {reminders === "denied"
+                ? "Avisos de água desligados nas permissões."
+                : "Avisos de água entram no app instalado."}
+            </Text>
+          )}
         </View>
 
-        <View style={styles.habits}>
-          <SoftTouch
-            style={[styles.habit, today.workout_done && styles.habitActive]}
-            onPress={() => toggleHabit("workout_done")}
-          >
-            <Text style={styles.habitIcon}>🏋️</Text>
-            <Text style={[styles.habitText, today.workout_done && styles.habitTextActive]}>Treinei</Text>
-          </SoftTouch>
+        {weekClose ? (
+          <View style={styles.card}>
+            <Edge />
+            <Text style={styles.kicker}>{weekClose.title}</Text>
+            <Text style={styles.closeLoad}>{weekClose.load}</Text>
+            <Text style={styles.tileBody}>{weekClose.training}</Text>
+            <Text style={styles.tileBody}>{weekClose.water}</Text>
+          </View>
+        ) : null}
+
+        <View style={styles.card}>
+          <Edge />
+          <Text style={styles.section}>Semana</Text>
+          <View style={styles.weekStrip}>
+            {weekDots.map((item) => {
+              const day = item.date === getLocalISODate() ? today : item.data;
+              const date = new Date(`${item.date}T12:00:00`);
+              const session = profile.trainingPlan ? sessionForDate(profile.trainingPlan, date) : null;
+              const isToday = item.date === getLocalISODate();
+              const trained = Boolean(!session?.rest && day?.workout_done);
+              const rest = Boolean(session?.rest);
+              return (
+                <View
+                  key={item.date}
+                  style={[
+                    styles.weekDot,
+                    isToday && styles.weekDotToday,
+                    trained && styles.weekDotOn,
+                    rest && styles.weekDotRest,
+                  ]}
+                >
+                  <Text style={[styles.weekDotLabel, (trained || isToday) && styles.weekDotLabelOn]}>
+                    {weekDays[date.getDay()]}
+                  </Text>
+                  <Text style={[styles.weekDotNum, trained && styles.weekDotLabelOn]}>{date.getDate()}</Text>
+                </View>
+              );
+            })}
+          </View>
+          <View style={styles.waterAdd}>
+            <TextInput
+              style={styles.waterInput}
+              placeholder="peso kg"
+              placeholderTextColor={colors.textSecondary}
+              keyboardType="decimal-pad"
+              value={newWeight}
+              onChangeText={setNewWeight}
+            />
+            <SoftTouch style={styles.waterAddButton} onPress={handleWeighIn}>
+              <Text style={styles.waterAddText}>Peso</Text>
+            </SoftTouch>
+          </View>
+          <WeightSpark points={weightPoints} />
         </View>
 
-        <SoftTouch style={styles.coachCard} onPress={() => navigation.navigate("Treino")}>
-          <Text style={styles.coachKicker}>Treino de hoje</Text>
-          <Text style={styles.coachTitle}>
-            {profile.trainingPlan ? sessionForDate(profile.trainingPlan).title : "Definir prioridades"}
-          </Text>
-          <Text style={styles.coachBody}>
-            {profile.trainingPlan
-              ? sessionForDate(profile.trainingPlan).summary
-              : "Escolhe até dois grupos e os dias da semana. A ficha é gerada a partir disso."}
-          </Text>
+        <SoftTouch style={styles.card} onPress={() => navigation.navigate("Dieta")}>
+          <Edge />
+          <Text style={styles.section}>Refeições</Text>
+          {meals.length ? (
+            meals.map((meal) => (
+              <View key={meal.id} style={styles.dietRow}>
+                <Text style={styles.dietCheck}>{mealsDone[meal.id] ? "✓" : "○"}</Text>
+                <Text style={styles.dietTitle} numberOfLines={1}>
+                  {meal.title}
+                </Text>
+              </View>
+            ))
+          ) : (
+            <Text style={styles.dietOption}>Diz quantas refeições faz, na aba Dieta.</Text>
+          )}
         </SoftTouch>
 
-        <SoftTouch style={styles.chatButton} onPress={() => navigation.navigate("Chat")}>
+        <View style={styles.card}>
+          <Edge />
+          <ProgressBar label="Calorias" current={today.total_calories} target={targets.calories} suffix=" kcal" color={colors.calories} />
+          <ProgressBar label="Proteína" current={today.total_protein} target={targets.protein} suffix="g" color={colors.primary} />
+          <ProgressBar label="Carboidratos" current={today.total_carbs} target={targets.carb} suffix="g" color={colors.carbs} />
+          <ProgressBar label="Gorduras" current={today.total_fats} target={targets.fat} suffix="g" color={colors.fat} />
+        </View>
+
+        <SoftTouch style={[styles.chatButton, { marginTop: 8 }]} onPress={() => navigation.navigate("Chat")}>
+          <Edge />
           <Text style={styles.chatButtonText}>Falar com o tutor</Text>
-        </SoftTouch>
-        <SoftTouch style={styles.leave} onPress={() => signOut(auth)}>
-          <Text style={styles.leaveText}>Sair da conta</Text>
         </SoftTouch>
       </ScrollView>
       </Reveal>
@@ -377,12 +484,67 @@ export function DashboardScreen({ navigation }: Props) {
               onChangeText={setNewWeight}
             />
             <SoftTouch style={styles.chatButton} onPress={handleWeighIn}>
+              <Edge />
               <Text style={styles.chatButtonText}>Recalcular Dieta!</Text>
             </SoftTouch>
           </View>
         </View>
       </Modal>
     </SafeAreaView>
+  );
+}
+
+function WeightSpark({ points }: { points: number[] }) {
+  if (!points.length) return null;
+  const min = Math.min(...points);
+  const max = Math.max(...points);
+  const span = max - min || 1;
+  return (
+    <View style={{ marginTop: 12 }}>
+      <View style={{ flexDirection: "row", alignItems: "flex-end", height: 36, gap: 3 }}>
+        {points.map((weight, index) => (
+          <View
+            key={`${weight}-${index}`}
+            style={{
+              flex: 1,
+              height: 8 + ((weight - min) / span) * 28,
+              backgroundColor: colors.primary,
+              borderRadius: 3,
+              opacity: 0.35 + (0.65 * index) / Math.max(1, points.length - 1),
+            }}
+          />
+        ))}
+      </View>
+      <Text style={{ color: colors.textSecondary, fontSize: 12, marginTop: 6 }}>
+        {points.length === 1
+          ? `${points[0].toFixed(1).replace(".", ",")} kg`
+          : `${points[0].toFixed(1).replace(".", ",")} → ${points[points.length - 1].toFixed(1).replace(".", ",")} kg`}
+      </Text>
+    </View>
+  );
+}
+
+function StatCell({
+  label,
+  value,
+  max,
+  maxLabel,
+  color,
+}: {
+  label: string;
+  value: number | string;
+  max?: number;
+  maxLabel?: string;
+  color: string;
+}) {
+  return (
+    <View style={styles.statCell}>
+      <Text style={[styles.statValue, { color }]}>{value}</Text>
+      <Text style={styles.statLabel}>
+        {label}
+        {max != null ? ` / ${Math.round(max)}` : maxLabel ? ` / ${maxLabel}` : ""}
+      </Text>
+    </View>
   );
 }
 
@@ -422,8 +584,48 @@ const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: colors.background },
   loading: { flex: 1, backgroundColor: colors.background, alignItems: "center", justifyContent: "center" },
   content: { padding: 20, paddingBottom: 40 },
-  brandRow: { marginBottom: 16 },
-  greeting: { color: colors.text, fontSize: 28, fontWeight: "800", marginBottom: 18 },
+  header: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 18 },
+  greeting: { color: colors.text, fontSize: 28, fontWeight: "800" },
+  dateLine: { color: colors.textSecondary, marginTop: 4, marginBottom: 16, textTransform: "capitalize" },
+  todayRow: { flexDirection: "row", gap: 10, marginBottom: 12 },
+  todayTile: {
+    flex: 1,
+    backgroundColor: colors.surface,
+    borderRadius: 20,
+    padding: 14,
+    borderWidth: 1,
+    borderColor: colors.border,
+    minHeight: 132,
+    justifyContent: "space-between",
+    overflow: "hidden",
+  },
+  kicker: { color: colors.primary, fontWeight: "700", fontSize: 12, letterSpacing: 0.4, textTransform: "uppercase" },
+  tileTitle: { color: colors.text, fontSize: 18, fontWeight: "800", marginTop: 8, lineHeight: 22 },
+  tileBody: { color: colors.textSecondary, marginTop: 8, lineHeight: 18, fontSize: 13 },
+  miniHabit: {
+    marginTop: 12,
+    alignSelf: "flex-start",
+    backgroundColor: colors.surfaceHighlight,
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+  },
+  miniHabitOn: { backgroundColor: colors.primary },
+  miniHabitText: { color: colors.text, fontWeight: "800", fontSize: 12 },
+  miniHabitTextOn: { color: colors.background },
+  statGrid: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginBottom: 12 },
+  statCell: {
+    width: "48%",
+    flexGrow: 1,
+    backgroundColor: colors.surface,
+    borderRadius: 16,
+    paddingVertical: 12,
+    paddingHorizontal: 12,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  statValue: { fontSize: 22, fontWeight: "800" },
+  statLabel: { color: colors.textSecondary, marginTop: 2, fontSize: 12, fontWeight: "600" },
   card: {
     backgroundColor: colors.surface,
     borderRadius: 18,
@@ -431,24 +633,28 @@ const styles = StyleSheet.create({
     marginBottom: 14,
     borderWidth: 1,
     borderColor: colors.border,
+    overflow: "hidden",
   },
   section: { color: colors.text, fontWeight: "700", marginBottom: 12 },
-  closeRange: { color: colors.textSecondary, marginTop: -6, marginBottom: 10 },
-  closeLine: { color: colors.text, lineHeight: 20, marginBottom: 4 },
-  closeLoad: { color: colors.primary, fontWeight: "700", lineHeight: 20, marginTop: 8 },
-  dietCount: { color: colors.primary, fontWeight: "700", marginBottom: 10 },
-  dietRow: { flexDirection: "row", gap: 10, marginBottom: 8 },
+  closeLoad: { color: colors.primary, fontWeight: "700", lineHeight: 20, marginTop: 6 },
+  dietRow: { flexDirection: "row", gap: 10, marginBottom: 8, alignItems: "center" },
   dietCheck: { color: colors.primary, width: 16, fontWeight: "800" },
-  dietCopy: { flex: 1 },
-  dietTitle: { color: colors.text, fontWeight: "700" },
-  dietOption: { color: colors.textSecondary, fontSize: 12, marginTop: 2 },
-  weekRow: { paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: colors.border },
-  weekToday: { backgroundColor: colors.wash, marginHorizontal: -8, paddingHorizontal: 8, borderRadius: 10 },
-  weekHead: { flexDirection: "row", justifyContent: "space-between" },
-  weekDay: { color: colors.text, fontWeight: "700" },
-  weekWeight: { color: colors.primary, fontWeight: "700" },
-  weekDetail: { color: colors.textSecondary, marginTop: 2, fontSize: 12 },
-  waterHint: { color: colors.textSecondary, lineHeight: 18, marginBottom: 10 },
+  dietTitle: { color: colors.text, fontWeight: "700", flex: 1 },
+  dietOption: { color: colors.textSecondary, fontSize: 13 },
+  weekStrip: { flexDirection: "row", justifyContent: "space-between", marginBottom: 12 },
+  weekDot: {
+    width: 40,
+    borderRadius: 12,
+    paddingVertical: 8,
+    alignItems: "center",
+    backgroundColor: colors.surfaceHighlight,
+  },
+  weekDotToday: { borderWidth: 1, borderColor: colors.primary },
+  weekDotOn: { backgroundColor: colors.primary },
+  weekDotRest: { opacity: 0.55 },
+  weekDotLabel: { color: colors.textSecondary, fontSize: 10, fontWeight: "700", textTransform: "uppercase" },
+  weekDotNum: { color: colors.text, fontWeight: "800", marginTop: 2 },
+  weekDotLabelOn: { color: colors.background },
   waterAmounts: { flexDirection: "row", gap: 8, marginBottom: 10 },
   waterChip: {
     flex: 1,
@@ -484,35 +690,18 @@ const styles = StyleSheet.create({
   barValue: { color: colors.textSecondary },
   barTrack: { height: 10, backgroundColor: colors.surfaceHighlight, borderRadius: 99, overflow: "hidden" },
   barFill: { height: 10, borderRadius: 99 },
-  habits: { flexDirection: "row", gap: 10, marginBottom: 16 },
-  habit: {
-    flex: 1,
-    backgroundColor: colors.surface,
-    borderRadius: 16,
-    padding: 14,
-    borderWidth: 1,
-    borderColor: colors.border,
-    alignItems: "center",
-  },
-  habitActive: { borderColor: colors.primary, backgroundColor: colors.wash },
-  habitIcon: { fontSize: 22 },
-  habitText: { color: colors.textSecondary, marginTop: 6, fontWeight: "600" },
-  habitTextActive: { color: colors.primary },
-  chatButton: { backgroundColor: colors.primary, borderRadius: 14, paddingVertical: 16, alignItems: "center" },
+  chatButton: { backgroundColor: colors.primary, borderRadius: 14, paddingVertical: 16, alignItems: "center", overflow: "hidden" },
   chatButtonText: { color: colors.background, fontWeight: "800" },
-  leave: { marginTop: 18, alignItems: "center", paddingVertical: 12 },
   leaveText: { color: colors.textSecondary, fontWeight: "700" },
-  coachCard: {
-    backgroundColor: colors.surface,
+  careCard: {
+    backgroundColor: colors.wash,
     borderRadius: 18,
-    padding: 16,
-    marginBottom: 14,
+    padding: 14,
+    marginBottom: 12,
     borderWidth: 1,
-    borderColor: colors.border,
+    borderColor: colors.primary,
+    overflow: "hidden",
   },
-  coachKicker: { color: colors.primary, fontWeight: "700", marginBottom: 4 },
-  coachTitle: { color: colors.text, fontSize: 18, fontWeight: "800" },
-  coachBody: { color: colors.textSecondary, marginTop: 6, lineHeight: 20 },
   modalBackdrop: { flex: 1, backgroundColor: "rgba(0,0,0,0.72)", justifyContent: "center", padding: 24 },
   modalCard: { backgroundColor: colors.surface, borderRadius: 20, padding: 20 },
   modalTitle: { color: colors.text, fontSize: 22, fontWeight: "800" },

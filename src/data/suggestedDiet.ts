@@ -1,3 +1,6 @@
+import { pantryScore } from "./pantry";
+import type { GroceryItem } from "../services/nutrition";
+
 export type FoodAnswer = "eats" | "avoids";
 
 export type SuggestedFood = {
@@ -63,12 +66,22 @@ export function foodById(id: string): SuggestedFood | undefined {
   return foods.find((food) => food.id === id);
 }
 
-export function suggestFood(slotId: string, answers: Record<string, FoodAnswer>, skipped: string[]): SuggestedFood | null {
+export function suggestFood(
+  slotId: string,
+  answers: Record<string, FoodAnswer>,
+  skipped: string[],
+  pantry?: GroceryItem[],
+): SuggestedFood | null {
   const open = foods.filter(
     (food) => food.slots.includes(slotId) && answers[food.id] !== "avoids" && !skipped.includes(food.id),
   );
-  const known = open.filter((food) => answers[food.id] === "eats");
-  return known[0] ?? open[0] ?? null;
+  if (!open.length) return null;
+  const ranked = [...open].sort((a, b) => {
+    const eat = Number(answers[b.id] === "eats") - Number(answers[a.id] === "eats");
+    if (eat) return eat;
+    return pantryScore(pantry, b.id, b.label) - pantryScore(pantry, a.id, a.label);
+  });
+  return ranked[0];
 }
 
 export function foodsForSlot(slotId: string, answers: Record<string, FoodAnswer>): SuggestedFood[] {
@@ -83,6 +96,54 @@ export function eatenNames(answers: Record<string, FoodAnswer> | undefined): str
 export function avoidedNames(answers: Record<string, FoodAnswer> | undefined): string[] {
   if (!answers) return [];
   return foods.filter((food) => answers[food.id] === "avoids").map((food) => food.label);
+}
+
+export function shoppingList(answers: Record<string, FoodAnswer> | undefined): string[] {
+  if (!answers) return [];
+  const lines: Record<string, string> = {
+    ovos: "Ovos",
+    "pao-queijo": "Pão integral e queijo",
+    "iogurte-fruta": "Iogurte natural e fruta",
+    aveia: "Aveia e leite",
+    fruta: "Fruta",
+    tapioca: "Goma de tapioca e ovos",
+    "arroz-frango": "Arroz, feijão, frango e folha",
+    "arroz-carne": "Arroz, feijão, carne magra e legumes",
+    omelete: "Ovos e legumes",
+    "frango-salada": "Frango e folha",
+    sopa: "Legumes e carne para sopa",
+    sanduiche: "Pão integral, frango ou ovo, folha",
+  };
+  return foods.filter((food) => answers[food.id] === "eats").map((food) => lines[food.id] ?? food.label);
+}
+
+export function mealReminderHours(count: number): number[] {
+  return slotsForCount(count).map((slot) => Math.min(21, Math.max(7, slot.start + 1)));
+}
+
+export function mealReminderSlots(
+  meals: { id: string }[],
+  mealsPerDay?: number,
+): { id: string; hour: number }[] {
+  if (meals.length) {
+    const hours: Record<string, number> = {
+      cafe: 8,
+      colacao: 11,
+      almoco: 14,
+      lanche: 17,
+      jantar: 20,
+      ceia: 21,
+    };
+    return meals.map((meal, index) => ({
+      id: meal.id,
+      hour: hours[meal.id] ?? Math.min(21, 8 + index * 3),
+    }));
+  }
+  if (!mealsPerDay || mealsPerDay < 3) return [];
+  return slotsForCount(mealsPerDay).map((slot) => ({
+    id: slot.id,
+    hour: Math.min(21, Math.max(7, slot.start + 1)),
+  }));
 }
 
 export function suggestedSchedule(count: number, answers: Record<string, FoodAnswer> | undefined) {

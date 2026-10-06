@@ -4,10 +4,28 @@ import { BottomTabScreenProps } from "@react-navigation/bottom-tabs";
 import { doc, onSnapshot, setDoc } from "firebase/firestore";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { CheckPop, Reveal, SoftTouch, easeLayout } from "../components/motion";
-import { Exercise, LoadMemory, StoredPlan, loadKey, loadSlots, rulesFor, sessionForDate, volumeOf } from "../data/trainingPlan";
+import { Edge } from "../components/Edge";
+import {
+  Exercise,
+  LoadMemory,
+  StoredPlan,
+  alternativesFor,
+  applySessionToday,
+  isoDate,
+  loadKey,
+  loadSlots,
+  rulesFor,
+  sessionForDate,
+  sessionLetter,
+  swapExercise,
+  trainingOrder,
+  volumeOf,
+  weekAgenda,
+} from "../data/trainingPlan";
 import { MainTabParamList } from "../navigation/types";
 import { auth, db } from "../services/firebaseConfig";
 import { UserProfile, getLocalISODate, trackingDocId } from "../services/nutrition";
+import { clearTodayTrainingAlert } from "../services/caregiver";
 import { formatRest, restIsRunning, restSecondsLeft, startRest, stopRest, finishRestIfDone } from "../services/restTimer";
 import { openHealthConnectDownload, readWatchNight } from "../services/watchSleep";
 import { colors } from "../theme/colors";
@@ -46,6 +64,8 @@ export function WorkoutScreen({ navigation }: Props) {
   const [showRules, setShowRules] = useState(false);
   const [restChoice, setRestChoice] = useState(90);
   const [restTick, setRestTick] = useState(0);
+  const [yesterdayDone, setYesterdayDone] = useState(false);
+  const [swapId, setSwapId] = useState<string | null>(null);
   const logRef = useRef(log);
   logRef.current = log;
   const memoryRef = useRef(memory);
@@ -53,6 +73,10 @@ export function WorkoutScreen({ navigation }: Props) {
   const draftsRef = useRef(drafts);
   draftsRef.current = drafts;
   const today = plan ? sessionForDate(plan) : null;
+  const yesterdayDate = new Date();
+  yesterdayDate.setDate(yesterdayDate.getDate() - 1);
+  const yesterday = plan ? sessionForDate(plan, yesterdayDate) : null;
+  const missedYesterday = Boolean(yesterday && !yesterday.rest && !yesterdayDone);
   const restLeft = restIsRunning() ? restSecondsLeft() : 0;
   void restTick;
 
@@ -85,6 +109,19 @@ export function WorkoutScreen({ navigation }: Props) {
       }
       const data = snapshot.data() as Partial<WorkoutLog>;
       setLog({ done: data.done ?? [], loads: data.loads ?? {} });
+    });
+  }, []);
+
+  useEffect(() => {
+    const uid = auth.currentUser?.uid;
+    if (!uid) return;
+    const yesterdayIso = (() => {
+      const date = new Date();
+      date.setDate(date.getDate() - 1);
+      return getLocalISODate(date);
+    })();
+    return onSnapshot(doc(db, "daily_tracking", trackingDocId(uid, yesterdayIso)), (snapshot) => {
+      setYesterdayDone(Boolean(snapshot.data()?.workout_done));
     });
   }, []);
 
@@ -155,6 +192,7 @@ export function WorkoutScreen({ navigation }: Props) {
     const finished = today && !today.rest && today.exercises.every((exercise) => next.done.includes(exercise.id));
     if (finished) {
       await setDoc(doc(db, "daily_tracking", trackingDocId(uid)), { workout_done: true }, { merge: true });
+      await clearTodayTrainingAlert();
     }
   }
 
@@ -200,6 +238,29 @@ export function WorkoutScreen({ navigation }: Props) {
     await setDoc(doc(db, "users", uid), { lastLoads: remembered }, { merge: true });
   }
 
+  async function pickToday(hint: string) {
+    if (!plan) return;
+    const shifted = applySessionToday(plan, hint);
+    if ("error" in shifted) return;
+    const uid = auth.currentUser?.uid;
+    if (!uid) return;
+    await setDoc(doc(db, "users", uid), { trainingPlan: shifted.plan }, { merge: true });
+  }
+
+  async function swapNow(exercise: Exercise, newName: string) {
+    if (!plan) return;
+    const swapped = swapExercise(plan, {
+      currentName: exercise.name,
+      newName,
+      note: "Aparelho ocupado",
+    });
+    if ("error" in swapped) return;
+    const uid = auth.currentUser?.uid;
+    if (!uid) return;
+    setSwapId(null);
+    await setDoc(doc(db, "users", uid), { trainingPlan: swapped.plan }, { merge: true });
+  }
+
   function toggle(exercise: Exercise) {
     easeLayout();
     const marking = !log.done.includes(exercise.id);
@@ -217,6 +278,7 @@ export function WorkoutScreen({ navigation }: Props) {
             Escolhe até duas prioridades e quantos dias você treina. A ficha sai disso.
           </Text>
           <SoftTouch style={styles.button} onPress={() => navigation.getParent()?.navigate("TrainingSetup")}>
+            <Edge />
             <Text style={styles.buttonText}>Definir prioridades</Text>
           </SoftTouch>
         </Reveal>
@@ -228,10 +290,47 @@ export function WorkoutScreen({ navigation }: Props) {
     <SafeAreaView style={styles.safe} edges={["top"]}>
       <Reveal>
       <ScrollView contentContainerStyle={styles.content}>
-        <Text style={styles.kicker}>{today.dayLabel}</Text>
+        <Text style={styles.kicker}>
+          {today.dayLabel}
+          {today.rest ? "" : ` · Treino ${sessionLetter(plan, today.id)}`}
+        </Text>
         <Text style={styles.title}>{today.title}</Text>
         <Text style={styles.summary}>{today.summary}</Text>
         {plan.progressionReason ? <Text style={styles.summary}>{plan.progressionReason}</Text> : null}
+
+        {missedYesterday ? (
+          <View style={styles.sleepBox}>
+            <Text style={styles.sleepTitle}>Ontem ficou para trás</Text>
+            <Text style={styles.sleepNote}>
+              Era o treino {sessionLetter(plan, yesterday!.id)} ({yesterday!.title}). Faz ele hoje; o que ainda falta nesta semana empurra e o descanso sai do lugar se precisar.
+            </Text>
+            <SoftTouch style={styles.watchButton} onPress={() => pickToday("ontem")}>
+              <Text style={styles.watchButtonText}>Fazer o de ontem hoje</Text>
+            </SoftTouch>
+          </View>
+        ) : null}
+
+        <View style={styles.sleepBox}>
+          <Text style={styles.sleepTitle}>Qual treino é hoje</Text>
+          <Text style={styles.sleepNote}>
+            Se o calendário não bate com o que você vai fazer, escolhe aqui. O resto da semana se rearranja.
+          </Text>
+          <View style={styles.pickRow}>
+            {trainingOrder(plan).map((session) => {
+              const letter = sessionLetter(plan, session.id);
+              const on = session.id === today.id;
+              return (
+                <SoftTouch
+                  key={session.id}
+                  style={[styles.pickChip, on && styles.sleepOn]}
+                  onPress={() => pickToday(letter)}
+                >
+                  <Text style={[styles.pickText, on && styles.sleepTextOn]}>{letter}</Text>
+                </SoftTouch>
+              );
+            })}
+          </View>
+        </View>
 
         {today.rest ? null : (
           <View style={styles.sleepBox}>
@@ -304,6 +403,7 @@ export function WorkoutScreen({ navigation }: Props) {
 
         {today.rest ? null : (
           <View style={styles.card}>
+            <Edge />
             {today.exercises.map((exercise, index) => {
               const checked = log.done.includes(exercise.id);
               const slots = loadSlots(exercise);
@@ -347,6 +447,18 @@ export function WorkoutScreen({ navigation }: Props) {
                   <SoftTouch style={styles.restLink} onPress={() => startRest(restChoice)}>
                     <Text style={styles.restLinkText}>Descanso {formatRest(restChoice)}</Text>
                   </SoftTouch>
+                  <SoftTouch style={styles.restLink} onPress={() => setSwapId(swapId === exercise.id ? null : exercise.id)}>
+                    <Text style={styles.restLinkText}>
+                      {swapId === exercise.id ? "Fechar troca" : "Trocar exercício"}
+                    </Text>
+                  </SoftTouch>
+                  {swapId === exercise.id
+                    ? alternativesFor(exercise).map((name) => (
+                        <SoftTouch key={name} style={styles.swapOption} onPress={() => swapNow(exercise, name)}>
+                          <Text style={styles.swapOptionText}>{name}</Text>
+                        </SoftTouch>
+                      ))
+                    : null}
                   {showingLast(exercise) ? (
                     <Text style={styles.lastHint}>
                       Última vez
@@ -361,12 +473,18 @@ export function WorkoutScreen({ navigation }: Props) {
         )}
 
         <Text style={styles.section}>Semana</Text>
-        {plan.sessions.map((session) => (
-          <View key={session.id} style={[styles.weekRow, session.id === today.id && styles.weekToday]}>
-            <Text style={styles.weekDay}>{session.dayLabel}</Text>
-            <Text style={styles.weekTitle}>{session.rest ? "Descanso" : session.title}</Text>
-          </View>
-        ))}
+        {weekAgenda(plan).map((item) => {
+          const letter = item.session.rest ? "" : sessionLetter(plan, item.session.id);
+          const isToday = isoDate(item.date) === isoDate();
+          return (
+            <View key={isoDate(item.date)} style={[styles.weekRow, isToday && styles.weekToday]}>
+              <Text style={styles.weekDay}>{["Domingo", "Segunda", "Terça", "Quarta", "Quinta", "Sexta", "Sábado"][item.date.getDay()]}</Text>
+              <Text style={styles.weekTitle}>
+                {item.session.rest ? "Descanso" : `${letter} · ${item.session.title}`}
+              </Text>
+            </View>
+          );
+        })}
 
         <Text style={styles.section}>Volume da semana</Text>
         {volumeOf(plan).map((item) => (
@@ -440,6 +558,7 @@ const styles = StyleSheet.create({
     padding: 12,
     borderWidth: 1,
     borderColor: colors.border,
+    overflow: "hidden",
   },
   exercise: { marginBottom: 14 },
   exerciseHead: { flexDirection: "row", gap: 12 },
@@ -481,6 +600,26 @@ const styles = StyleSheet.create({
   restChipText: { color: colors.text, fontWeight: "700", fontSize: 12 },
   restLink: { marginLeft: 44, marginTop: 8 },
   restLinkText: { color: colors.primary, fontWeight: "700" },
+  swapOption: {
+    marginLeft: 44,
+    marginTop: 6,
+    backgroundColor: colors.background,
+    borderRadius: 10,
+    padding: 10,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  swapOptionText: { color: colors.text, fontWeight: "700" },
+  pickRow: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginTop: 10 },
+  pickChip: {
+    minWidth: 44,
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+    borderRadius: 12,
+    backgroundColor: colors.surfaceHighlight,
+    alignItems: "center",
+  },
+  pickText: { color: colors.text, fontWeight: "800" },
   section: { color: colors.text, fontWeight: "800", marginTop: 22, marginBottom: 8 },
   weekRow: {
     flexDirection: "row",
@@ -503,6 +642,7 @@ const styles = StyleSheet.create({
     paddingVertical: 16,
     alignItems: "center",
     marginTop: 16,
+    overflow: "hidden",
   },
   buttonText: { color: colors.background, fontWeight: "800" },
 });

@@ -4,6 +4,7 @@ import { NativeStackScreenProps } from "@react-navigation/native-stack";
 import { doc, getDoc, setDoc } from "firebase/firestore";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Reveal, SoftTouch } from "../components/motion";
+import { Edge } from "../components/Edge";
 import { DaysPerWeek, MUSCLES, MuscleId, buildPlan, progressionFor } from "../data/trainingPlan";
 import { RootStackParamList } from "../navigation/types";
 import { auth, db } from "../services/firebaseConfig";
@@ -152,6 +153,7 @@ export function TrainingSetupScreen({ navigation }: Props) {
         ))}
 
         <SoftTouch style={styles.button} onPress={generate} disabled={saving}>
+          <Edge />
           <Text style={styles.buttonText}>{saving ? "Gerando..." : "Gerar treino"}</Text>
         </SoftTouch>
       </ScrollView>
@@ -229,6 +231,7 @@ const styles = StyleSheet.create({
     paddingVertical: 16,
     alignItems: "center",
     marginTop: 18,
+    overflow: "hidden",
   },
   buttonText: { color: colors.background, fontWeight: "800" },
 });

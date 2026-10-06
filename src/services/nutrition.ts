@@ -28,10 +28,25 @@ export type FrequentFood = {
   detail: string;
 };
 
+export type GroceryItem = {
+  id: string;
+  name: string;
+  quantity: string;
+  price: number | null;
+  boughtAt: string;
+};
+
 export type Vitamin = {
   id: string;
   name: string;
   dose: string;
+};
+
+export type CareMemory = {
+  notes: string[];
+  lastCareAt?: string;
+  lastAlert?: string;
+  lastPingAt?: string;
 };
 
 export type UserProfile = {
@@ -49,6 +64,11 @@ export type UserProfile = {
   lastLoads?: Record<string, { values: string[]; date: string }>;
   mealsPerDay?: number;
   foodAnswers?: Record<string, FoodAnswer>;
+  careMemory?: CareMemory;
+  routineNote?: string;
+  pantry?: GroceryItem[];
+  shoppingHelp?: boolean;
+  shopBudget?: number | null;
 };
 
 export type DailyTracking = {
@@ -152,4 +172,42 @@ export function needsWeighIn(profile: UserProfile): boolean {
   const reference = profile.lastWeighInDate ?? profile.createdAt;
   const days = daysSince(reference);
   return days === null || days >= 7;
+}
+
+export function mergeGroceries(
+  current: GroceryItem[],
+  incoming: { name: string; quantity?: string; price?: number | null }[],
+): GroceryItem[] {
+  const now = new Date().toISOString();
+  const next = [...current];
+  for (const item of incoming) {
+    const name = String(item.name ?? "").trim();
+    if (!name) continue;
+    const index = next.findIndex((row) => row.name.toLowerCase() === name.toLowerCase());
+    const priceRaw = item.price;
+    const price =
+      priceRaw != null && Number.isFinite(Number(priceRaw)) && Number(priceRaw) > 0 ? Number(priceRaw) : null;
+    const quantity = String(item.quantity ?? "").trim() || (index >= 0 ? next[index].quantity : "1");
+    const row: GroceryItem = {
+      id: index >= 0 ? next[index].id : `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
+      name,
+      quantity,
+      price: price ?? (index >= 0 ? next[index].price : null),
+      boughtAt: now,
+    };
+    if (index >= 0) next[index] = row;
+    else next.unshift(row);
+  }
+  return next.slice(0, 80);
+}
+
+export function pantryScript(items: GroceryItem[] | undefined): string {
+  if (!items?.length) return "Despensa vazia.";
+  const total = items.reduce((sum, item) => sum + (item.price ?? 0), 0);
+  const lines = items.map((item) => {
+    const price = item.price != null ? ` · R$ ${item.price.toFixed(2).replace(".", ",")}` : "";
+    return `- ${item.name}: ${item.quantity}${price}`;
+  });
+  const spent = total > 0 ? `\nSoma dos preços que ele informou: R$ ${total.toFixed(2).replace(".", ",")}.` : "";
+  return `${lines.join("\n")}${spent}`;
 }

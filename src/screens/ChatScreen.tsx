@@ -24,7 +24,9 @@ import { File } from "expo-file-system";
 import * as ImagePicker from "expo-image-picker";
 import { doc, getDoc } from "firebase/firestore";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { BottomTabScreenProps } from "@react-navigation/bottom-tabs";
 import { ChatAttachment, ChatMessage, sendMessageToAI, transcribeAudio } from "../services/aiService";
+import { MainTabParamList } from "../navigation/types";
 import { auth, db } from "../services/firebaseConfig";
 import { DailyTracking, FrequentFood, UserProfile, emptyDay } from "../services/nutrition";
 import { trackingDocId } from "../services/nutrition";
@@ -35,20 +37,22 @@ import { colors } from "../theme/colors";
 const welcome: ChatMessage = {
   id: "1",
   role: "assistant",
-  text: "Pode falar o que comeu, pedir o treino do dia ou perguntar das vitaminas. Foto do prato ou do aparelho, e PDF da dieta ou do treino, também entram por aqui.",
+  text: "Pode falar o que comeu, o treino, as vitaminas. No mercado, dita o que comprou, a quantidade e o preço — eu gravo e monto prato ou lanche com isso. Se quiser, também digo o que ainda falta comprar.",
 };
 
 const MAX_FILE_BYTES = 8 * 1024 * 1024;
 
 type PendingFile = ChatAttachment & { base64: string };
 type PortionLine = { id: string; food: string; amount: string };
-type PhotoKind = "food" | "gear";
+type PhotoKind = "food" | "gear" | "receipt";
 
 function blankPortion(): PortionLine {
   return { id: `${Date.now()}-${Math.random()}`, food: "", amount: "" };
 }
 
-export function ChatScreen() {
+type Props = BottomTabScreenProps<MainTabParamList, "Chat">;
+
+export function ChatScreen({ route }: Props) {
   const recorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
   const listRef = useRef<FlatList<ChatMessage>>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([welcome]);
@@ -58,6 +62,7 @@ export function ChatScreen() {
   const [portions, setPortions] = useState<PortionLine[]>([blankPortion()]);
   const [busy, setBusy] = useState(false);
   const [recording, setRecording] = useState(false);
+  const [market, setMarket] = useState(false);
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [today, setToday] = useState<DailyTracking>(emptyDay());
   const [foods, setFoods] = useState<FrequentFood[]>([]);
@@ -95,7 +100,7 @@ export function ChatScreen() {
     let trimmed = text.trim();
     const image = Boolean(file?.mime.startsWith("image/"));
     if (image && file && !photoKind) {
-      Alert.alert("Foto", "Diz se é comida ou aparelho.");
+      Alert.alert("Foto", "Diz se é comida, aparelho ou cupom.");
       return;
     }
     if (image && photoKind === "food") {
@@ -109,6 +114,12 @@ export function ChatScreen() {
     }
     if (image && photoKind === "gear") {
       trimmed = `${trimmed ? `${trimmed}\n` : ""}Foto de um aparelho. Diz qual equipamento é e para qual exercício da ficha ele serve.`;
+    }
+    if (image && photoKind === "receipt") {
+      trimmed = `${trimmed ? `${trimmed}\n` : ""}Foto de cupom fiscal. Extraia nome, quantidade e preço de cada item e chame save_groceries. Não registre refeição.`;
+    }
+    if (market && photoKind !== "food") {
+      trimmed = `[MODO MERCADO] ${trimmed || "Estou no mercado."}`;
     }
     if ((!trimmed && !file) || busy) return;
     const attachment = file
@@ -137,6 +148,14 @@ export function ChatScreen() {
     setMessages((current) => [...current, { ...reply, id: Date.now().toString() }]);
     setBusy(false);
   }
+
+  const seeded = useRef(false);
+  useEffect(() => {
+    const seed = route.params?.seed?.trim();
+    if (!seed || seeded.current || busy || !profile) return;
+    seeded.current = true;
+    void send(seed, null);
+  }, [route.params?.seed, busy, profile]);
 
   async function takePhoto() {
     if (busy) return;
@@ -239,6 +258,14 @@ export function ChatScreen() {
         <View style={styles.header}>
           <Mark size={16} />
           <Text style={styles.title}>Tutor</Text>
+          <SoftTouch
+            style={[styles.market, market && styles.marketOn]}
+            onPress={() => setMarket((on) => !on)}
+          >
+            <Text style={[styles.marketText, market && styles.marketTextOn]}>
+              {market ? "No mercado" : "Estou no mercado"}
+            </Text>
+          </SoftTouch>
         </View>
         <FlatList
           ref={listRef}
@@ -294,6 +321,12 @@ export function ChatScreen() {
               >
                 <Text style={[styles.kindText, photoKind === "gear" && styles.kindTextOn]}>Aparelho</Text>
               </SoftTouch>
+              <SoftTouch
+                style={[styles.kind, photoKind === "receipt" && styles.kindOn]}
+                onPress={() => setPhotoKind("receipt")}
+              >
+                <Text style={[styles.kindText, photoKind === "receipt" && styles.kindTextOn]}>Cupom</Text>
+              </SoftTouch>
             </View>
             {photoKind === "food"
               ? portions.map((line) => (
@@ -348,15 +381,15 @@ export function ChatScreen() {
           </View>
           <SoftTouch
             style={[styles.action, recording && styles.actionOn]}
-            onPress={input.trim() || pending ? () => send(input) : undefined}
-            onPressIn={input.trim() || pending ? undefined : startRecording}
-            onPressOut={input.trim() || pending ? undefined : stopRecording}
+            onPress={input.trim() || pending || market ? () => send(input) : undefined}
+            onPressIn={input.trim() || pending || market ? undefined : startRecording}
+            onPressOut={input.trim() || pending || market ? undefined : stopRecording}
             disabled={busy}
           >
             {busy ? (
               <ActivityIndicator color={colors.background} />
             ) : (
-              <Ionicons name={input.trim() || pending ? "send" : "mic"} size={22} color={colors.background} />
+              <Ionicons name={input.trim() || pending || market ? "send" : "mic"} size={22} color={colors.background} />
             )}
           </SoftTouch>
         </View>
@@ -378,7 +411,16 @@ const styles = StyleSheet.create({
   },
   back: { color: colors.primary, fontWeight: "700", width: 70 },
   backSpacer: { width: 70 },
-  title: { color: colors.text, fontWeight: "800", fontSize: 18 },
+  title: { color: colors.text, fontWeight: "800", fontSize: 18, flex: 1 },
+  market: {
+    borderRadius: 12,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    backgroundColor: colors.surfaceHighlight,
+  },
+  marketOn: { backgroundColor: colors.primary },
+  marketText: { color: colors.text, fontWeight: "700", fontSize: 12 },
+  marketTextOn: { color: colors.background },
   list: { padding: 16, gap: 10 },
   bubble: { maxWidth: "85%", borderRadius: 16, padding: 12 },
   user: { alignSelf: "flex-end", backgroundColor: colors.primary },
