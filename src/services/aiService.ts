@@ -459,6 +459,7 @@ export async function sendMessageToAI(
   }
   const prior = history
     .filter((message) => message.id !== "1")
+    .slice(-20)
     .map((message) => ({
       role: message.role,
       content: message.attachment

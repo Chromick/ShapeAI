@@ -1,0 +1,12 @@
+{
+  "name": "shape-ai-api",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "jose": "^6.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "typescript": "^5.9.3"
+  }
+}

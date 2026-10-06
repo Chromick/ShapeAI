@@ -26,6 +26,7 @@ import { doc, getDoc } from "firebase/firestore";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { BottomTabScreenProps } from "@react-navigation/bottom-tabs";
 import { ChatAttachment, ChatMessage, sendMessageToAI, transcribeAudio } from "../services/aiService";
+import { clearChat, loadChat, saveChat } from "../services/chatHistory";
 import { MainTabParamList } from "../navigation/types";
 import { auth, db } from "../services/firebaseConfig";
 import { DailyTracking, FrequentFood, UserProfile, emptyDay } from "../services/nutrition";
@@ -40,7 +41,7 @@ const welcome: ChatMessage = {
   text: "Pode falar o que comeu, o treino, as vitaminas. No mercado, dita o que comprou, a quantidade e o preço — eu gravo e monto prato ou lanche com isso. Se quiser, também digo o que ainda falta comprar.",
 };
 
-const MAX_FILE_BYTES = 8 * 1024 * 1024;
+const MAX_FILE_BYTES = 3 * 1024 * 1024;
 
 type PendingFile = ChatAttachment & { base64: string };
 type PortionLine = { id: string; food: string; amount: string };
@@ -66,6 +67,29 @@ export function ChatScreen({ route }: Props) {
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [today, setToday] = useState<DailyTracking>(emptyDay());
   const [foods, setFoods] = useState<FrequentFood[]>([]);
+  const [historyReady, setHistoryReady] = useState(false);
+
+  useEffect(() => {
+    loadChat().then((stored) => {
+      if (stored.length) setMessages((current) => (current.length > 1 ? current : [welcome, ...stored]));
+      setHistoryReady(true);
+    });
+  }, []);
+
+  function startOver() {
+    Alert.alert("Nova conversa", "Apaga o histórico do tutor? Despensa, treino e dieta continuam salvos.", [
+      { text: "Cancelar", style: "cancel" },
+      {
+        text: "Apagar",
+        style: "destructive",
+        onPress: () => {
+          easeLayout();
+          setMessages([welcome]);
+          void clearChat();
+        },
+      },
+    ]);
+  }
 
   useEffect(() => {
     const uid = auth.currentUser?.uid;
@@ -132,7 +156,8 @@ export function ChatScreen({ route }: Props) {
       attachment,
     };
     easeLayout();
-    setMessages((current) => [...current, userMessage]);
+    const withUser = [...messages, userMessage];
+    setMessages(withUser);
     setInput("");
     clearAttachment();
     setBusy(true);
@@ -145,17 +170,19 @@ export function ChatScreen({ route }: Props) {
       file ? { name: file.name, mime: file.mime, base64: file.base64 } : undefined,
     );
     easeLayout();
-    setMessages((current) => [...current, { ...reply, id: Date.now().toString() }]);
+    const finished = [...withUser, { ...reply, id: Date.now().toString() }];
+    setMessages(finished);
     setBusy(false);
+    void saveChat(finished, welcome.id);
   }
 
   const seeded = useRef(false);
   useEffect(() => {
     const seed = route.params?.seed?.trim();
-    if (!seed || seeded.current || busy || !profile) return;
+    if (!seed || seeded.current || busy || !profile || !historyReady) return;
     seeded.current = true;
     void send(seed, null);
-  }, [route.params?.seed, busy, profile]);
+  }, [route.params?.seed, busy, profile, historyReady]);
 
   async function takePhoto() {
     if (busy) return;
@@ -191,7 +218,7 @@ export function ChatScreen({ route }: Props) {
     if (result.canceled || !result.assets[0]) return;
     const asset = result.assets[0];
     if (asset.size && asset.size > MAX_FILE_BYTES) {
-      Alert.alert("Arquivo grande", "Manda um PDF ou uma imagem de até 8 MB.");
+      Alert.alert("Arquivo grande", "Manda um PDF ou uma imagem de até 3 MB.");
       return;
     }
     const mime = asset.mimeType || (asset.name.toLowerCase().endsWith(".pdf") ? "application/pdf" : "image/jpeg");
@@ -241,8 +268,8 @@ export function ChatScreen({ route }: Props) {
       Alert.alert(
         "Erro",
         missing
-          ? "Falta a chave da OpenAI no arquivo .env."
-          : `Falha ao enviar áudio: ${String(error)}`,
+          ? "Entre na sua conta para mandar áudio ao tutor."
+          : `Falha ao enviar áudio: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
   }
@@ -266,6 +293,11 @@ export function ChatScreen({ route }: Props) {
               {market ? "No mercado" : "Estou no mercado"}
             </Text>
           </SoftTouch>
+          {messages.length > 1 ? (
+            <SoftTouch onPress={startOver} hitSlop={10} disabled={busy}>
+              <Ionicons name="trash-outline" size={20} color={colors.textSecondary} />
+            </SoftTouch>
+          ) : null}
         </View>
         <FlatList
           ref={listRef}

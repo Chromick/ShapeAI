@@ -17,7 +17,7 @@ import { DailyTracking, GroceryItem, UserProfile, Vitamin, emptyDay, trackingDoc
 import { syncMealReminders } from "../services/reminders";
 import { colors } from "../theme/colors";
 
-const MAX_FILE_BYTES = 8 * 1024 * 1024;
+const MAX_FILE_BYTES = 3 * 1024 * 1024;
 
 export function DietScreen() {
   const [plan, setPlan] = useState("");
@@ -101,7 +101,7 @@ export function DietScreen() {
     if (picked.canceled || !picked.assets[0]) return;
     const asset = picked.assets[0];
     if (asset.size && asset.size > MAX_FILE_BYTES) {
-      Alert.alert("Arquivo grande", "Manda um PDF ou uma imagem de até 8 MB.");
+      Alert.alert("Arquivo grande", "Manda um PDF ou uma imagem de até 3 MB.");
       return;
     }
     const mime = asset.mimeType || (asset.name.toLowerCase().endsWith(".pdf") ? "application/pdf" : "image/jpeg");

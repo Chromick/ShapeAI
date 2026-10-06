@@ -1,0 +1,38 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(uid) {
+      return signedIn() && request.auth.uid == uid;
+    }
+
+    // Day documents are keyed as `${uid}_${yyyy-mm-dd}`.
+    function ownsDay(docId) {
+      return signedIn() && docId.matches(request.auth.uid + '_[0-9]{4}-[0-9]{2}-[0-9]{2}');
+    }
+
+    match /users/{uid} {
+      allow read, write: if isOwner(uid);
+    }
+
+    match /chat_history/{uid} {
+      allow read, write: if isOwner(uid);
+    }
+
+    match /daily_tracking/{docId} {
+      allow read, write: if ownsDay(docId);
+    }
+
+    match /workout_logs/{docId} {
+      allow read, write: if ownsDay(docId);
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

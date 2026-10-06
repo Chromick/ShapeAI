@@ -8,6 +8,7 @@ import { Ionicons } from "@expo/vector-icons";
 import { StatusBar } from "expo-status-bar";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 import { MainTabParamList, RootStackParamList } from "./src/navigation/types";
+import { watchAppUpdates } from "./src/services/appUpdates";
 import { syncWatchSleepOnce } from "./src/services/daySync";
 import { runCaregiver } from "./src/services/caregiver";
 import { auth } from "./src/services/firebaseConfig";
@@ -88,6 +89,8 @@ function MainTabs() {
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
   const [booting, setBooting] = useState(true);
+
+  useEffect(() => watchAppUpdates(), []);
 
   useEffect(() => {
     return onAuthStateChanged(auth, (next) => {
